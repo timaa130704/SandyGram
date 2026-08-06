@@ -45,7 +45,7 @@ const AVATAR_TONES = ["#2b2b2b", "#3a3a3a", "#4a4a4a", "#5a5a5a", "#6b6b6b", "#7
 const ONLINE_WINDOW = 70e3;
 const QUICK_REACTIONS = ["❤️", "👍", "🔥", "😂", "😮", "😢"];
 const SITE = "https://sandygram-a3b42.web.app";
-const APP_VERSION = "1.2.0";
+const APP_VERSION = "1.2.1";
 const APK_URL = "https://github.com/timaa130704/SandyGram/releases/latest/download/SandyGram.apk";
 // Коды стикеров OpenMoji — картинки лежат на хостинге сайта
 const STICKERS = ["1F600","1F602","1F60D","1F60E","1F914","1F644","1F62D","1F621","1F973","1F97A","1F480","1F4A9","1F525","2764","1F44D","1F44E","1F44C","1F64F","1F4AA","1F440","1F389","1F680","26A1","1F31A","1F31D","1F63B","1F63C","1F998","1F984","1F37F"];
@@ -1041,6 +1041,7 @@ function ChatScreen({ ctx, chatId }) {
   const recStartRef = useRef(0);
   const lastTyping = useRef(0);
   const listRef = useRef(null);
+  const sendingRef = useRef(false); // защита от спама по кнопке отправки
 
   const isForum = !!(chat?.topics && chat.topics.length);
   const isAdmin = (chat?.type === "group" || chat?.type === "channel") && (chat.ownerUid === me.uid || (chat.admins || []).includes(me.uid));
@@ -1123,7 +1124,9 @@ function ChatScreen({ ctx, chatId }) {
   };
   const submit = async () => {
     const body = text.trim();
-    if (!body) return;
+    if (!body || sendingRef.current) return;
+    sendingRef.current = true;
+    setText(""); // очищаем сразу — повторный тап не отправит то же самое
     try {
       if (editTarget) {
         await updateDoc(doc(db, "chats", chatId, "messages", editTarget.id), { text: body.slice(0, 4000), editedAt: Date.now() });
@@ -1133,11 +1136,12 @@ function ChatScreen({ ctx, chatId }) {
         await sendTo(chat, { textBody: body });
         listRef.current?.scrollToOffset({ offset: 0, animated: true });
       }
-      setText(""); setReplyTo(null);
+      setReplyTo(null);
     } catch (e) {
+      setText(body); // вернуть текст при ошибке
       if ((e?.code || "").includes("permission-denied") && chat.type === "private") Alert.alert("", "Не отправлено: пользователь вас заблокировал");
       else Alert.alert("Ошибка", ruError(e));
-    }
+    } finally { sendingRef.current = false; }
   };
   const pickPhoto = async () => {
     const res = await ImagePicker.launchImageLibraryAsync({ mediaTypes: ["images"], quality: 0.5, base64: true, allowsEditing: false });

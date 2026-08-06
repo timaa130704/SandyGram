@@ -796,13 +796,17 @@ async function sendMessage({ text = "", image = null, sticker = null, voice = nu
   batch.update(doc(dbf, "chats", chatId), chatPatch);
   await batch.commit();
 }
+let sendBusy = false; // защита от спама по кнопке отправки
 $("#messageForm").addEventListener("submit", async (event) => {
   event.preventDefault();
-  if (!currentChatId) return;
+  if (!currentChatId || sendBusy) return;
   const text = messageInput.value.trim();
   if (!text) return;
   const chat = currentChat();
   if (isForum(chat) && !currentTopic) return;
+  sendBusy = true;
+  // очищаем поле сразу — повторный тап не отправит то же самое
+  messageInput.value = ""; autoGrow(messageInput);
   try {
     if (editTarget) {
       await updateDoc(doc(dbf, "chats", currentChatId, "messages", editTarget.id), { text: text.slice(0, 4000), editedAt: Date.now() });
@@ -811,12 +815,12 @@ $("#messageForm").addEventListener("submit", async (event) => {
       const send = $("#sendButton");
       send.classList.remove("sent"); void send.offsetWidth; send.classList.add("sent");
     }
-    messageInput.value = ""; autoGrow(messageInput);
     cancelReplyEdit();
   } catch (error) {
+    messageInput.value = text; autoGrow(messageInput); // вернуть текст при ошибке
     if ((error?.code || "").includes("permission-denied") && currentChat()?.type === "private") toast("Не отправлено: пользователь вас заблокировал");
     else toast(ruError(error));
-  }
+  } finally { sendBusy = false; }
 });
 
 // ---------- reply / edit ----------
