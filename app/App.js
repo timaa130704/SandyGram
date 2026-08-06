@@ -4,6 +4,7 @@ import {
   View, Text, TextInput, TouchableOpacity, FlatList, Image, Modal,
   KeyboardAvoidingView, Platform, StyleSheet, ScrollView,
   ActivityIndicator, Alert, AppState, Linking, Animated, PanResponder,
+  BackHandler, Keyboard,
 } from "react-native";
 import { SafeAreaView, SafeAreaProvider } from "react-native-safe-area-context";
 import { StatusBar } from "expo-status-bar";
@@ -44,6 +45,8 @@ const AVATAR_TONES = ["#2b2b2b", "#3a3a3a", "#4a4a4a", "#5a5a5a", "#6b6b6b", "#7
 const ONLINE_WINDOW = 70e3;
 const QUICK_REACTIONS = ["❤️", "👍", "🔥", "😂", "😮", "😢"];
 const SITE = "https://sandygram-a3b42.web.app";
+const APP_VERSION = "1.2.0";
+const APK_URL = "https://github.com/timaa130704/SandyGram/releases/latest/download/SandyGram.apk";
 // Коды стикеров OpenMoji — картинки лежат на хостинге сайта
 const STICKERS = ["1F600","1F602","1F60D","1F60E","1F914","1F644","1F62D","1F621","1F973","1F97A","1F480","1F4A9","1F525","2764","1F44D","1F44E","1F44C","1F64F","1F4AA","1F440","1F389","1F680","26A1","1F31A","1F31D","1F63B","1F63C","1F998","1F984","1F37F"];
 
@@ -183,6 +186,28 @@ function SandyGram() {
 
   useEffect(() => { AsyncStorage.getItem("theme").then(v => v && setThemeName(v)); }, []);
   const toggleTheme = () => { const n = themeName === "dark" ? "light" : "dark"; setThemeName(n); AsyncStorage.setItem("theme", n); };
+
+  // ---- уведомление о новой версии ----
+  useEffect(() => {
+    (async () => {
+      try {
+        const d = await getDoc(doc(db, "meta", "app"));
+        if (!d.exists()) return;
+        const latest = d.data().version || "";
+        const newer = (a, b) => {
+          const x = a.split(".").map(Number), y = b.split(".").map(Number);
+          for (let i = 0; i < 3; i++) { if ((x[i] || 0) > (y[i] || 0)) return true; if ((x[i] || 0) < (y[i] || 0)) return false; }
+          return false;
+        };
+        if (latest && newer(latest, APP_VERSION)) {
+          Alert.alert("Доступно обновление", `Вышла версия ${latest} (у вас ${APP_VERSION}). Скачать?`, [
+            { text: "Позже", style: "cancel" },
+            { text: "Скачать", onPress: () => Linking.openURL(d.data().apk || APK_URL) },
+          ]);
+        }
+      } catch { }
+    })();
+  }, []);
 
   // ---- deep links: sandygram://join/<code> и https://…/join/<code> ----
   useEffect(() => {
@@ -1020,6 +1045,25 @@ function ChatScreen({ ctx, chatId }) {
   const isForum = !!(chat?.topics && chat.topics.length);
   const isAdmin = (chat?.type === "group" || chat?.type === "channel") && (chat.ownerUid === me.uid || (chat.admins || []).includes(me.uid));
 
+  // системный жест/кнопка «назад» = навигация, а не выход из приложения
+  useEffect(() => {
+    const sub = BackHandler.addEventListener("hardwareBackPress", () => {
+      if (searchOpen) { setSearchOpen(false); return true; }
+      if (topic) { setTopic(null); return true; }
+      setScreen({ name: "list" });
+      return true;
+    });
+    return () => sub.remove();
+  }, [topic, searchOpen]);
+
+  // клавиатура не должна перекрывать поле ввода (edge-to-edge Android)
+  const [kbHeight, setKbHeight] = useState(0);
+  useEffect(() => {
+    const s1 = Keyboard.addListener("keyboardDidShow", (e) => setKbHeight(e.endCoordinates?.height || 0));
+    const s2 = Keyboard.addListener("keyboardDidHide", () => setKbHeight(0));
+    return () => { s1.remove(); s2.remove(); };
+  }, []);
+
   useEffect(() => {
     const q = query(collection(db, "chats", chatId, "messages"), orderBy("createdAt", "desc"), limit(300));
     const unsub = onSnapshot(q, (snap) => {
@@ -1315,7 +1359,7 @@ function ChatScreen({ ctx, chatId }) {
           }}
         />
       ) : (
-        <KeyboardAvoidingView style={{ flex: 1 }} behavior={Platform.OS === "ios" ? "padding" : undefined}>
+        <KeyboardAvoidingView style={{ flex: 1, paddingBottom: Platform.OS === "android" ? kbHeight : 0 }} behavior={Platform.OS === "ios" ? "padding" : undefined}>
           <FlatList
             ref={listRef}
             inverted

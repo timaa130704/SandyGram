@@ -2,7 +2,7 @@
   "expo": {
     "name": "SandyGram",
     "slug": "sandygram",
-    "version": "1.0.0",
+    "version": "1.2.0",
     "orientation": "portrait",
     "icon": "./assets/icon.png",
     "userInterfaceStyle": "automatic",
@@ -35,7 +35,8 @@
           ]
         }
       ],
-      "googleServicesFile": "./google-services.json"
+      "googleServicesFile": "./google-services.json",
+      "versionCode": 3
     },
     "web": {
       "favicon": "./assets/favicon.png"

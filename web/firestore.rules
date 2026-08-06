@@ -24,6 +24,11 @@ service cloud.firestore {
       allow delete: if authed() && resource.data.uid == request.auth.uid;
     }
 
+    // Версия приложения для уведомления об обновлении (пишет только админ через сервисный ключ)
+    match /meta/app {
+      allow get: if true;
+    }
+
     // Карточки инвайтов: только точечное чтение по коду, перебор запрещён
     match /invites/{code} {
       allow get: if authed();
