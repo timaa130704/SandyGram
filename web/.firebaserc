@@ -1,0 +1,18 @@
+{
+  "projects": {
+    "default": "sandygram-a3b42"
+  },
+  "targets": {
+    "sandygram-a3b42": {
+      "hosting": {
+        "app": [
+          "sandygram-a3b42"
+        ],
+        "info": [
+          "info-sandygram"
+        ]
+      }
+    }
+  },
+  "etags": {}
+}

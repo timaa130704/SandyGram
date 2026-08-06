@@ -1,0 +1,218 @@
+<!doctype html>
+<html lang="ru">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover" />
+  <meta name="theme-color" content="#0a0a0a" />
+  <meta name="description" content="SandyGram — быстрый монохромный мессенджер. Чаты, группы, каналы, голосовые, стикеры и push-уведомления. Скачайте приложение для Android или пользуйтесь в браузере." />
+  <title>SandyGram — скачать мессенджер</title>
+  <style>
+    :root {
+      --bg: #0a0a0a; --surface: #141414; --surface-2: #1e1e1e; --outline: #2c2c2c;
+      --text: #f2f2f2; --muted: #8f8f8f; --inverse: #f5f5f5; --on-inverse: #0d0d0d;
+      --r-xl: 28px; --r-l: 20px; --r-m: 14px;
+    }
+    * { margin: 0; padding: 0; box-sizing: border-box; }
+    html { scroll-behavior: smooth; }
+    body {
+      background: var(--bg); color: var(--text);
+      font-family: "Segoe UI", system-ui, -apple-system, Roboto, sans-serif;
+      line-height: 1.55; overflow-x: hidden;
+    }
+    .wrap { max-width: 1060px; margin: 0 auto; padding: 0 22px; }
+
+    /* ---------- шапка ---------- */
+    header {
+      display: flex; align-items: center; justify-content: space-between;
+      padding: 20px 0;
+    }
+    .brand { display: flex; align-items: center; gap: 12px; font-weight: 800; font-size: 20px; }
+    .brand-mark {
+      width: 44px; height: 44px; border-radius: 15px; background: var(--inverse); color: var(--on-inverse);
+      display: grid; place-items: center; font-size: 22px; font-weight: 800;
+    }
+    .header-link {
+      color: var(--muted); text-decoration: none; font-size: 14.5px; font-weight: 600;
+      padding: 10px 18px; border: 1px solid var(--outline); border-radius: 999px; transition: .2s;
+    }
+    .header-link:hover { color: var(--text); border-color: var(--muted); }
+
+    /* ---------- герой ---------- */
+    .hero {
+      display: grid; grid-template-columns: 1.15fr .85fr; gap: 40px; align-items: center;
+      padding: 60px 0 80px;
+    }
+    .hero h1 { font-size: clamp(38px, 6vw, 62px); line-height: 1.08; letter-spacing: -1.5px; }
+    .hero h1 span { color: var(--muted); }
+    .hero p.lead { color: var(--muted); font-size: 18px; margin: 20px 0 34px; max-width: 480px; }
+    .cta-row { display: flex; gap: 14px; flex-wrap: wrap; align-items: center; }
+    .btn-primary {
+      display: inline-flex; align-items: center; gap: 12px;
+      background: var(--inverse); color: var(--on-inverse); text-decoration: none;
+      font-weight: 800; font-size: 17px; padding: 18px 32px; border-radius: 999px;
+      transition: transform .15s ease, box-shadow .15s ease;
+      box-shadow: 0 10px 40px rgba(255,255,255,.08);
+    }
+    .btn-primary:hover { transform: translateY(-2px); box-shadow: 0 16px 50px rgba(255,255,255,.14); }
+    .btn-primary small { display: block; font-weight: 600; font-size: 11.5px; opacity: .65; }
+    .btn-ghost {
+      color: var(--text); text-decoration: none; font-weight: 700; font-size: 15px;
+      padding: 17px 28px; border: 1px solid var(--outline); border-radius: 999px; transition: .2s;
+    }
+    .btn-ghost:hover { border-color: var(--muted); background: var(--surface); }
+    .hero-note { color: var(--muted); font-size: 13px; margin-top: 16px; }
+
+    /* ---------- телефон-мокап ---------- */
+    .phone {
+      width: 290px; margin: 0 auto; background: var(--surface); border: 1px solid var(--outline);
+      border-radius: 38px; padding: 14px; box-shadow: 0 30px 80px rgba(0,0,0,.6);
+      transform: rotate(2deg);
+    }
+    .phone-screen { background: var(--bg); border-radius: 26px; padding: 14px 12px; min-height: 480px; }
+    .p-header { display: flex; align-items: center; gap: 10px; margin-bottom: 14px; }
+    .p-avatar {
+      width: 36px; height: 36px; border-radius: 50%; background: #4a4a4a; flex: none;
+      display: grid; place-items: center; font-weight: 700; font-size: 15px;
+    }
+    .p-header b { font-size: 14px; display: block; }
+    .p-header small { color: var(--muted); font-size: 11px; }
+    .msg { max-width: 78%; padding: 9px 13px; border-radius: 16px; font-size: 13px; margin-bottom: 8px; }
+    .msg.in { background: var(--surface-2); border-bottom-left-radius: 5px; }
+    .msg.out { background: var(--inverse); color: var(--on-inverse); margin-left: auto; border-bottom-right-radius: 5px; }
+    .msg .t { display: block; text-align: right; font-size: 9.5px; opacity: .6; margin-top: 3px; }
+    .p-voice { display: flex; align-items: center; gap: 8px; }
+    .p-play { width: 26px; height: 26px; border-radius: 50%; background: var(--on-inverse); color: var(--inverse); display: grid; place-items: center; font-size: 10px; flex: none; }
+    .p-wave { display: flex; gap: 2px; align-items: center; }
+    .p-wave i { width: 3px; border-radius: 2px; background: currentColor; opacity: .7; }
+    .p-sticker { font-size: 56px; margin: 4px 0 8px; }
+    .p-typing { color: var(--muted); font-size: 11.5px; font-style: italic; padding-left: 4px; }
+
+    /* ---------- фичи ---------- */
+    .section-title { font-size: 30px; font-weight: 800; letter-spacing: -.5px; margin-bottom: 8px; }
+    .section-sub { color: var(--muted); margin-bottom: 34px; }
+    .features {
+      display: grid; grid-template-columns: repeat(auto-fill, minmax(240px, 1fr)); gap: 14px;
+      padding-bottom: 70px;
+    }
+    .card {
+      background: var(--surface); border: 1px solid var(--outline); border-radius: var(--r-xl);
+      padding: 26px 22px; transition: .2s;
+    }
+    .card:hover { border-color: #454545; transform: translateY(-3px); }
+    .card .ico {
+      width: 48px; height: 48px; border-radius: 16px; background: var(--surface-2);
+      display: grid; place-items: center; font-size: 22px; margin-bottom: 16px;
+    }
+    .card h3 { font-size: 16.5px; margin-bottom: 6px; }
+    .card p { color: var(--muted); font-size: 14px; }
+
+    /* ---------- как установить ---------- */
+    .steps { display: grid; grid-template-columns: repeat(auto-fit, minmax(220px, 1fr)); gap: 14px; padding-bottom: 70px; }
+    .step { background: var(--surface); border: 1px solid var(--outline); border-radius: var(--r-l); padding: 22px; }
+    .step .num {
+      width: 34px; height: 34px; border-radius: 50%; background: var(--inverse); color: var(--on-inverse);
+      display: grid; place-items: center; font-weight: 800; margin-bottom: 14px;
+    }
+    .step p { color: var(--muted); font-size: 14px; }
+    .step b { color: var(--text); }
+
+    /* ---------- низ ---------- */
+    .bottom-cta {
+      text-align: center; background: var(--surface); border: 1px solid var(--outline);
+      border-radius: var(--r-xl); padding: 56px 24px; margin-bottom: 60px;
+    }
+    .bottom-cta h2 { font-size: 32px; letter-spacing: -.5px; margin-bottom: 10px; }
+    .bottom-cta p { color: var(--muted); margin-bottom: 28px; }
+    footer { color: var(--muted); font-size: 13px; text-align: center; padding-bottom: 36px; }
+    footer a { color: var(--text); }
+
+    @media (max-width: 800px) {
+      .hero { grid-template-columns: 1fr; padding: 30px 0 50px; text-align: center; }
+      .hero p.lead { margin-left: auto; margin-right: auto; }
+      .cta-row { justify-content: center; }
+      .phone { transform: none; margin-top: 30px; }
+    }
+  </style>
+</head>
+<body>
+  <div class="wrap">
+    <header>
+      <div class="brand"><div class="brand-mark">S</div>SandyGram</div>
+      <a class="header-link" href="https://sandygram-a3b42.web.app" target="_blank">Веб-версия ↗</a>
+    </header>
+
+    <section class="hero">
+      <div>
+        <h1>Мессенджер.<br /><span>Чёрно-белый.<br />Молниеносный.</span></h1>
+        <p class="lead">Чаты, группы с топиками, каналы, голосовые, стикеры и push-уведомления — в строгом монохромном дизайне. Без рекламы и лишнего.</p>
+        <div class="cta-row">
+          <a class="btn-primary" href="/SandyGram.apk" download>
+            <span style="font-size:24px">⬇</span>
+            <span>Скачать для Android<small>APK · бесплатно · ~73 МБ</small></span>
+          </a>
+          <a class="btn-ghost" href="https://sandygram-a3b42.web.app" target="_blank">Открыть в браузере</a>
+        </div>
+        <p class="hero-note">Android 7.0+ · аккаунт общий с веб-версией</p>
+      </div>
+      <div class="phone">
+        <div class="phone-screen">
+          <div class="p-header">
+            <div class="p-avatar">Д</div>
+            <div><b>Друг</b><small>в сети</small></div>
+          </div>
+          <div class="msg in">Привет! Ты уже в SandyGram? 👀<span class="t">21:37</span></div>
+          <div class="msg out">Да! Смотри что умею<span class="t">21:37 ✓✓</span></div>
+          <div class="msg out p-voice">
+            <span class="p-play">▶</span>
+            <span class="p-wave"><i style="height:6px"></i><i style="height:12px"></i><i style="height:9px"></i><i style="height:14px"></i><i style="height:7px"></i><i style="height:11px"></i><i style="height:5px"></i><i style="height:13px"></i><i style="height:8px"></i></span>
+            <small>0:07</small>
+          </div>
+          <div class="p-sticker">🔥</div>
+          <div class="msg in">Огонь! Качаю 🚀<span class="t">21:38</span></div>
+          <div class="p-typing">печатает…</div>
+        </div>
+      </div>
+    </section>
+
+    <section>
+      <h2 class="section-title">Всё как у больших</h2>
+      <p class="section-sub">Функции, которые вы ждёте от современного мессенджера</p>
+      <div class="features">
+        <div class="card"><div class="ico">💬</div><h3>Чаты и группы</h3><p>Личные сообщения, группы с топиками-форумами, админы и роли — как в Telegram.</p></div>
+        <div class="card"><div class="ico">📢</div><h3>Каналы</h3><p>Публикуйте посты для подписчиков. Пишут только админы.</p></div>
+        <div class="card"><div class="ico">🎤</div><h3>Голосовые</h3><p>Записывайте и слушайте голосовые сообщения в одно касание.</p></div>
+        <div class="card"><div class="ico">🧩</div><h3>Стикеры и реакции</h3><p>Набор стикеров и быстрые реакции ❤️ 👍 🔥 двойным тапом.</p></div>
+        <div class="card"><div class="ico">🔔</div><h3>Push-уведомления</h3><p>Узнавайте о новых сообщениях, даже когда приложение закрыто.</p></div>
+        <div class="card"><div class="ico">🔗</div><h3>Инвайт-ссылки</h3><p>Приглашайте в группы и каналы одной ссылкой.</p></div>
+        <div class="card"><div class="ico">✓✓</div><h3>Статусы и галочки</h3><p>«В сети», «печатает…», галочки прочтения — всё на месте.</p></div>
+        <div class="card"><div class="ico">🚫</div><h3>Приватность</h3><p>Чёрный список, скрытие времени захода, удаление аккаунта.</p></div>
+        <div class="card"><div class="ico">🌗</div><h3>Тёмная и светлая</h3><p>Строгий монохром в двух темах. Ничего лишнего.</p></div>
+      </div>
+    </section>
+
+    <section>
+      <h2 class="section-title">Установка за минуту</h2>
+      <p class="section-sub">APK ставится напрямую, без магазина приложений</p>
+      <div class="steps">
+        <div class="step"><div class="num">1</div><p><b>Скачайте APK</b> кнопкой выше прямо на телефон.</p></div>
+        <div class="step"><div class="num">2</div><p><b>Откройте файл.</b> Android спросит про неизвестный источник — разрешите для браузера.</p></div>
+        <div class="step"><div class="num">3</div><p><b>Установите</b> и создайте аккаунт: только имя и пароль, без номера телефона.</p></div>
+        <div class="step"><div class="num">4</div><p><b>Разрешите уведомления</b>, чтобы не пропускать сообщения. Готово!</p></div>
+      </div>
+    </section>
+
+    <section class="bottom-cta">
+      <h2>Начните за 30 секунд</h2>
+      <p>Аккаунт один на телефон и браузер. Никаких номеров телефона.</p>
+      <a class="btn-primary" href="/SandyGram.apk" download>
+        <span style="font-size:24px">⬇</span>
+        <span>Скачать SandyGram<small>для Android</small></span>
+      </a>
+    </section>
+
+    <footer>
+      SandyGram · <a href="https://sandygram-a3b42.web.app" target="_blank">веб-версия</a> · сделано в монохроме
+    </footer>
+  </div>
+</body>
+</html>

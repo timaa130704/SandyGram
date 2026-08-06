@@ -1,0 +1,29 @@
+{
+  "project_info": {
+    "project_number": "762527338102",
+    "project_id": "sandygram-a3b42",
+    "storage_bucket": "sandygram-a3b42.firebasestorage.app"
+  },
+  "client": [
+    {
+      "client_info": {
+        "mobilesdk_app_id": "1:762527338102:android:4e1c45c32d4ca59b591957",
+        "android_client_info": {
+          "package_name": "com.sandygram.app"
+        }
+      },
+      "oauth_client": [],
+      "api_key": [
+        {
+          "current_key": "AIzaSyCsjVsmIirIBYt2JujKnS2rXq78v1fB140"
+        }
+      ],
+      "services": {
+        "appinvite_service": {
+          "other_platform_oauth_client": []
+        }
+      }
+    }
+  ],
+  "configuration_version": "1"
+}

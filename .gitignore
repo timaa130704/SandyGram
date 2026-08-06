@@ -1,0 +1,10 @@
+node_modules/
+dist/
+android/
+.expo/
+*.log
+.firebase/
+service-account*.json
+ping-key.txt
+*.apk
+.wrangler/

@@ -1,0 +1,135 @@
+<!doctype html>
+<html lang="ru">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover, user-scalable=no" />
+    <meta name="theme-color" content="#0a0a0a" />
+    <title>SandyGram</title>
+    <link rel="stylesheet" href="/styles.css" />
+  </head>
+  <body>
+    <!-- ===== Auth ===== -->
+    <main class="auth-shell" id="authShell">
+      <section class="auth-card">
+        <div class="brand-mark">S</div>
+        <h1>SandyGram</h1>
+        <p class="muted">Быстрый монохромный мессенджер</p>
+        <div class="segment-control">
+          <button class="segment active" data-mode="register" type="button">Регистрация</button>
+          <button class="segment" data-mode="login" type="button">Вход</button>
+        </div>
+        <form id="authForm">
+          <label class="field"><span>Имя пользователя</span><input id="username" autocomplete="username" placeholder="например, driga" required /></label>
+          <label class="field"><span>Пароль</span><input id="password" type="password" autocomplete="current-password" placeholder="Минимум 6 символов" required /></label>
+          <p class="error" id="authError"></p>
+          <button class="primary-button" type="submit" id="submitButton">Создать аккаунт</button>
+        </form>
+      </section>
+    </main>
+
+    <!-- ===== Messenger ===== -->
+    <main class="messenger-shell hidden" id="messengerShell">
+      <aside class="sidebar" id="sidebar">
+        <header class="sidebar-top">
+          <button class="icon-button" id="menuButton" aria-label="Настройки">☰</button>
+          <div class="search-box"><span class="search-icon">⌕</span><input id="chatSearch" placeholder="Поиск" autocomplete="off" /></div>
+        </header>
+        <div class="chat-list" id="chatList"></div>
+        <div class="search-results hidden" id="searchResults"></div>
+        <button class="fab" id="newChatFab" aria-label="Новое сообщение">✎</button>
+      </aside>
+
+      <section class="conversation" id="conversation">
+        <div class="conversation-placeholder" id="conversationPlaceholder"><span>Выберите чат, чтобы начать общение</span></div>
+        <div class="conversation-inner hidden" id="conversationInner">
+          <header class="conversation-header" id="conversationHeader">
+            <button class="icon-button back-button" id="backButton" aria-label="Назад">‹</button>
+            <div class="avatar" id="chatAvatar">S</div>
+            <div class="chat-title-block" id="chatTitleBlock">
+              <strong id="chatTitle">Чат</strong>
+              <small id="chatSubtitle"></small>
+            </div>
+            <button class="icon-button" id="chatMenuButton" aria-label="Меню чата">⋮</button>
+          </header>
+          <div class="pinned-bar hidden" id="pinnedBar">
+            <span class="pin-mark">📌</span>
+            <span class="pinned-bar-text" id="pinnedBarText"></span>
+            <button class="icon-button small" id="unpinButton" aria-label="Открепить">✕</button>
+          </div>
+          <div class="messages" id="messages"></div>
+          <div class="reply-bar hidden" id="replyBar">
+            <div class="reply-bar-text"><b id="replyBarTitle"></b><span id="replyBarText"></span></div>
+            <button class="icon-button" id="cancelReply" aria-label="Отменить">✕</button>
+          </div>
+          <div class="closed-bar hidden" id="closedBar">🔒 Топик закрыт — писать могут только админы</div>
+          <form class="composer" id="messageForm">
+            <button type="button" class="icon-button" id="emojiButton" aria-label="Эмодзи">☺</button>
+            <button type="button" class="icon-button" id="attachButton" aria-label="Фото">📎</button>
+            <input type="file" id="fileInput" accept="image/*" hidden />
+            <textarea id="messageInput" rows="1" autocomplete="off" placeholder="Сообщение"></textarea>
+            <button type="button" class="icon-button" id="voiceButton" aria-label="Голосовое">🎤</button>
+            <button type="submit" class="send-button" id="sendButton" aria-label="Отправить">➤</button>
+          </form>
+          <div class="emoji-panel hidden" id="emojiPanel">
+            <div class="emoji-tabs">
+              <button type="button" id="tabEmoji" class="active">Эмодзи</button>
+              <button type="button" id="tabStickers">Стикеры</button>
+            </div>
+            <div class="emoji-grid" id="emojiGrid"></div>
+            <div class="sticker-grid hidden" id="stickerGrid"></div>
+          </div>
+        </div>
+      </section>
+
+      <!-- Settings -->
+      <aside class="side-panel hidden" id="settingsPanel">
+        <header class="panel-header"><button class="icon-button" id="closeSettings" aria-label="Закрыть">‹</button><h2>Настройки</h2></header>
+        <div class="settings-profile">
+          <div class="avatar large" id="settingsAvatar">S</div>
+          <h3 id="settingsName">SandyGram</h3>
+          <p class="muted" id="settingsHandle">@user</p>
+          <p id="settingsBio"></p>
+        </div>
+        <div class="settings-group">
+          <button class="settings-row" data-action="profile"><span class="row-icon">👤</span><span>Изменить профиль</span></button>
+          <button class="settings-row" data-action="photo"><span class="row-icon">🖼</span><span>Фото профиля</span></button>
+          <input type="file" id="avatarInput" accept="image/*" hidden />
+          <button class="settings-row" data-action="appearance"><span class="row-icon">◐</span><span>Тема: <b id="themeLabel">тёмная</b></span></button>
+          <button class="settings-row" data-action="color"><span class="row-icon">🎨</span><span>Цвет аватара</span></button>
+          <button class="settings-row" data-action="privacy"><span class="row-icon">👁</span><span>Скрывать время захода: <b id="lastSeenLabel">выкл</b></span></button>
+          <button class="settings-row" data-action="deleteAccount"><span class="row-icon">🗑</span><span>Удалить аккаунт</span></button>
+        </div>
+        <button class="logout-button" id="logoutButton">Выйти из аккаунта</button>
+      </aside>
+
+      <!-- New chat -->
+      <aside class="side-panel hidden" id="newChatPanel">
+        <header class="panel-header"><button class="icon-button" id="closeNewChat" aria-label="Закрыть">‹</button><h2>Новое сообщение</h2></header>
+        <div class="panel-body">
+          <div class="search-box"><span class="search-icon">⌕</span><input id="userSearch" placeholder="Найти пользователя" autocomplete="off" /></div>
+          <button class="settings-row" id="createGroupButton"><span class="row-icon">👥</span><span>Создать группу</span></button>
+          <button class="settings-row" id="createChannelButton"><span class="row-icon">📢</span><span>Создать канал</span></button>
+          <div class="user-results" id="userResults"></div>
+        </div>
+      </aside>
+
+      <!-- Chat info -->
+      <aside class="side-panel hidden" id="chatInfoPanel">
+        <header class="panel-header"><button class="icon-button" id="closeChatInfo" aria-label="Закрыть">‹</button><h2>Информация</h2></header>
+        <div class="panel-body" id="chatInfoBody"></div>
+      </aside>
+    </main>
+
+    <!-- Modal -->
+    <div class="modal-backdrop hidden" id="modalBackdrop">
+      <div class="modal" id="modal"></div>
+    </div>
+
+    <!-- Context menu -->
+    <div class="context-menu hidden" id="contextMenu"></div>
+
+    <div class="toast" id="toast"></div>
+    <script src="/firebase-config.js"></script>
+    <script type="module" src="/app.js"></script>
+  </body>
+</html>

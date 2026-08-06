@@ -1,0 +1,56 @@
+{
+  "expo": {
+    "name": "SandyGram",
+    "slug": "sandygram",
+    "version": "1.0.0",
+    "orientation": "portrait",
+    "icon": "./assets/icon.png",
+    "userInterfaceStyle": "automatic",
+    "ios": {
+      "supportsTablet": true
+    },
+    "android": {
+      "adaptiveIcon": {
+        "backgroundColor": "#E6F4FE",
+        "foregroundImage": "./assets/android-icon-foreground.png",
+        "backgroundImage": "./assets/android-icon-background.png",
+        "monochromeImage": "./assets/android-icon-monochrome.png"
+      },
+      "package": "com.sandygram.app",
+      "backgroundColor": "#0a0a0a",
+      "intentFilters": [
+        {
+          "action": "VIEW",
+          "autoVerify": false,
+          "data": [
+            {
+              "scheme": "https",
+              "host": "sandygram-a3b42.web.app",
+              "pathPrefix": "/join"
+            }
+          ],
+          "category": [
+            "BROWSABLE",
+            "DEFAULT"
+          ]
+        }
+      ],
+      "googleServicesFile": "./google-services.json"
+    },
+    "web": {
+      "favicon": "./assets/favicon.png"
+    },
+    "backgroundColor": "#0a0a0a",
+    "splash": {
+      "backgroundColor": "#0a0a0a"
+    },
+    "scheme": "sandygram",
+    "plugins": [
+      "expo-notifications",
+      "expo-audio"
+    ],
+    "notification": {
+      "color": "#0a0a0a"
+    }
+  }
+}
