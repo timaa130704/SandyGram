@@ -12,7 +12,20 @@
           "package_name": "com.sandygram.app"
         }
       },
-      "oauth_client": [],
+      "oauth_client": [
+        {
+          "client_id": "762527338102-sp4edtosufrq7tr30m3vpqjmegcfatld.apps.googleusercontent.com",
+          "client_type": 1,
+          "android_info": {
+            "package_name": "com.sandygram.app",
+            "certificate_hash": "5e8f16062ea3cd2c4a0d547876baa6f38cabf625"
+          }
+        },
+        {
+          "client_id": "762527338102-77jt8o1eshleh05mi1hitbvkeku0bu5k.apps.googleusercontent.com",
+          "client_type": 3
+        }
+      ],
       "api_key": [
         {
           "current_key": "AIzaSyCsjVsmIirIBYt2JujKnS2rXq78v1fB140"
@@ -20,7 +33,12 @@
       ],
       "services": {
         "appinvite_service": {
-          "other_platform_oauth_client": []
+          "other_platform_oauth_client": [
+            {
+              "client_id": "762527338102-77jt8o1eshleh05mi1hitbvkeku0bu5k.apps.googleusercontent.com",
+              "client_type": 3
+            }
+          ]
         }
       }
     }

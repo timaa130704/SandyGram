@@ -17,7 +17,10 @@ import AsyncStorage from "@react-native-async-storage/async-storage";
 import { auth, db } from "./fire";
 import {
   createUserWithEmailAndPassword, signInWithEmailAndPassword, signOut, onAuthStateChanged,
+  GoogleAuthProvider, signInWithCredential,
 } from "firebase/auth";
+import { GoogleSignin } from "@react-native-google-signin/google-signin";
+GoogleSignin.configure({ webClientId: "762527338102-77jt8o1eshleh05mi1hitbvkeku0bu5k.apps.googleusercontent.com" });
 import {
   doc, getDoc, getDocs, setDoc, updateDoc, deleteDoc, collection, query, where,
   orderBy, limit, onSnapshot, runTransaction, arrayUnion, arrayRemove, increment,
@@ -176,6 +179,7 @@ function SandyGram() {
   const [screen, setScreen] = useState({ name: "list" });
   const [pendingInvite, setPendingInvite] = useState(null);
   const [myPrefs, setMyPrefs] = useState({ blocked: [], hideLastSeen: false });
+  const [needName, setNeedName] = useState(null); // {uid, email, displayName, photoURL}
 
   useEffect(() => { AsyncStorage.getItem("theme").then(v => v && setThemeName(v)); }, []);
   const toggleTheme = () => { const n = themeName === "dark" ? "light" : "dark"; setThemeName(n); AsyncStorage.setItem("theme", n); };
@@ -196,7 +200,7 @@ function SandyGram() {
 
   // ---- auth (с восстановлением оборванной регистрации) ----
   useEffect(() => onAuthStateChanged(auth, async (user) => {
-    if (!user) { setMe(null); setChats(new Map()); setBooted(true); return; }
+    if (!user) { setMe(null); setNeedName(null); setChats(new Map()); setBooted(true); return; }
     let profile = null;
     for (let i = 0; i < 5 && !profile; i++) {
       try {
@@ -217,8 +221,8 @@ function SandyGram() {
         }
       } catch { }
     }
-    if (profile) setMe(profile);
-    else { await signOut(auth).catch(() => { }); Alert.alert("Ошибка", "Не удалось загрузить профиль. Проверьте интернет и попробуйте войти ещё раз."); }
+    if (profile) { setNeedName(null); setMe(profile); }
+    else setNeedName({ uid: user.uid, email: user.email, displayName: user.displayName, photoURL: user.photoURL });
     setBooted(true);
   }), []);
 
@@ -377,9 +381,10 @@ function SandyGram() {
   return (
     <View style={{ flex: 1, backgroundColor: T.bg }}>
       <StatusBar style={themeName === "dark" ? "light" : "dark"} />
-      {!me ? <AuthScreen ctx={ctx} />
-        : screen.name === "chat" ? <ChatScreen key={screen.chatId} ctx={ctx} chatId={screen.chatId} />
-          : <ListScreen ctx={ctx} />}
+      {needName ? <PickNameScreen ctx={ctx} pending={needName} onDone={(p) => { setNeedName(null); setMe(p); }} />
+        : !me ? <AuthScreen ctx={ctx} />
+          : screen.name === "chat" ? <ChatScreen key={screen.chatId} ctx={ctx} chatId={screen.chatId} />
+            : <ListScreen ctx={ctx} />}
     </View>
   );
 }
@@ -427,6 +432,20 @@ function AuthScreen({ ctx }) {
     } catch (e) { setErr(ruError(e)); }
     setBusy(false);
   };
+  const googleLogin = async () => {
+    setErr(""); setBusy(true);
+    try {
+      await GoogleSignin.hasPlayServices({ showPlayServicesUpdateDialog: true });
+      await GoogleSignin.signOut().catch(() => { }); // чтобы всегда показывался выбор аккаунта
+      const res = await GoogleSignin.signIn();
+      const idToken = res?.data?.idToken || res?.idToken;
+      if (idToken) await signInWithCredential(auth, GoogleAuthProvider.credential(idToken));
+    } catch (e) {
+      const msg = String(e?.code || e);
+      if (!/SIGN_IN_CANCELLED|12501/i.test(msg)) setErr(ruError(e));
+    }
+    setBusy(false);
+  };
   return (
     <SafeAreaView style={{ flex: 1, justifyContent: "center", padding: 24 }}>
       <View style={{ backgroundColor: T.surface, borderRadius: 28, padding: 24, alignItems: "center" }}>
@@ -451,6 +470,62 @@ function AuthScreen({ ctx }) {
         <TouchableOpacity onPress={submit} disabled={busy}
           style={{ backgroundColor: T.inverse, borderRadius: 999, paddingVertical: 14, alignSelf: "stretch", alignItems: "center", opacity: busy ? 0.6 : 1 }}>
           {busy ? <ActivityIndicator color={T.onInverse} /> : <Text style={{ color: T.onInverse, fontWeight: "800", fontSize: 16 }}>{mode === "register" ? "Создать аккаунт" : "Войти"}</Text>}
+        </TouchableOpacity>
+        <View style={{ flexDirection: "row", alignItems: "center", gap: 10, alignSelf: "stretch", marginVertical: 14 }}>
+          <View style={{ flex: 1, height: 1, backgroundColor: T.outline }} />
+          <Text style={{ color: T.muted, fontSize: 12 }}>или</Text>
+          <View style={{ flex: 1, height: 1, backgroundColor: T.outline }} />
+        </View>
+        <TouchableOpacity onPress={googleLogin} disabled={busy}
+          style={{ borderWidth: 1, borderColor: T.outline, borderRadius: 999, paddingVertical: 13, alignSelf: "stretch", alignItems: "center", flexDirection: "row", justifyContent: "center", gap: 10 }}>
+          <Text style={{ fontSize: 16, fontWeight: "800", color: T.text }}>G</Text>
+          <Text style={{ color: T.text, fontWeight: "700", fontSize: 15 }}>Войти через Google</Text>
+        </TouchableOpacity>
+      </View>
+    </SafeAreaView>
+  );
+}
+
+// ================================================================ ВЫБОР ИМЕНИ (первый вход через Google)
+function PickNameScreen({ ctx, pending, onDone }) {
+  const { T } = ctx;
+  const suggest = (pending.email || "user").split("@")[0].toLowerCase().replace(/[^a-z0-9_]/g, "").slice(0, 20) || "user";
+  const [name, setName] = useState(suggest);
+  const [err, setErr] = useState("");
+  const [busy, setBusy] = useState(false);
+  const confirm = async () => {
+    const clean = name.trim().toLowerCase().replace(/^@/, "");
+    setErr(""); setBusy(true);
+    try {
+      if (!/^[a-z0-9_]{3,24}$/.test(clean)) throw new Error("3–24 символа: латиница, цифры и _");
+      const taken = await getDoc(doc(db, "usernames", clean));
+      if (taken.exists() && taken.data().uid !== pending.uid) throw new Error("Это имя уже занято.");
+      const profile = {
+        username: clean, displayName: (pending.displayName || clean).slice(0, 40), bio: "",
+        avatarColor: Math.floor(Math.random() * 7), createdAt: Date.now(), lastSeen: Date.now(),
+      };
+      if (pending.photoURL) profile.avatar = pending.photoURL;
+      await setDoc(doc(db, "usernames", clean), { uid: pending.uid, email: pending.email || emailFor(clean), google: true });
+      await setDoc(doc(db, "users", pending.uid), profile);
+      await setDoc(doc(db, "chats", `saved_${pending.uid}`), { type: "saved", members: [pending.uid], createdAt: Date.now(), lastRead: {}, unread: {}, pinnedBy: [], muted: [] }).catch(() => { });
+      onDone({ uid: pending.uid, ...profile });
+    } catch (e) { setErr(ruError(e)); }
+    setBusy(false);
+  };
+  return (
+    <SafeAreaView style={{ flex: 1, justifyContent: "center", padding: 24 }}>
+      <View style={{ backgroundColor: T.surface, borderRadius: 28, padding: 24, alignItems: "center" }}>
+        <Text style={{ color: T.text, fontSize: 22, fontWeight: "800", marginBottom: 6 }}>Придумайте @username</Text>
+        <Text style={{ color: T.muted, textAlign: "center", marginBottom: 16 }}>Вы вошли через Google. Осталось выбрать имя, по которому вас смогут найти.</Text>
+        <TextInput value={name} onChangeText={setName} autoCapitalize="none" autoCorrect={false} placeholder="username" placeholderTextColor={T.muted}
+          style={[st.input, { backgroundColor: T.surface2, color: T.text }]} />
+        {!!err && <Text style={{ color: T.danger, marginBottom: 8, textAlign: "center" }}>{err}</Text>}
+        <TouchableOpacity onPress={confirm} disabled={busy}
+          style={{ backgroundColor: T.inverse, borderRadius: 999, paddingVertical: 14, alignSelf: "stretch", alignItems: "center", opacity: busy ? 0.6 : 1 }}>
+          {busy ? <ActivityIndicator color={T.onInverse} /> : <Text style={{ color: T.onInverse, fontWeight: "800", fontSize: 16 }}>Готово</Text>}
+        </TouchableOpacity>
+        <TouchableOpacity onPress={() => { signOut(auth); }} style={{ marginTop: 12 }}>
+          <Text style={{ color: T.muted }}>Выйти</Text>
         </TouchableOpacity>
       </View>
     </SafeAreaView>

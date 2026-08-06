@@ -446,3 +446,14 @@ input, textarea { font: inherit; color: inherit; background: none; border: 0; ou
 .voice-len { color: inherit; opacity: .7; font-size: 11px; white-space: nowrap; }
 #voiceButton.recording { color: #ff5555; animation: rec-pulse 1s infinite; }
 @keyframes rec-pulse { 0%,100% { opacity: 1; } 50% { opacity: .35; } }
+
+/* ---------- вход через Google ---------- */
+.auth-divider { display: flex; align-items: center; gap: 12px; margin: 16px 0; color: var(--text-muted); font-size: 12.5px; }
+.auth-divider::before, .auth-divider::after { content: ""; flex: 1; height: 1px; background: var(--outline); }
+.google-button {
+  display: flex; align-items: center; justify-content: center; gap: 10px;
+  width: 100%; padding: 13px; border-radius: 999px;
+  background: var(--surface-2, var(--surface)); border: 1px solid var(--outline);
+  color: var(--text); font-weight: 700; font-size: 15px; transition: .2s;
+}
+.google-button:hover { border-color: var(--text-muted); }

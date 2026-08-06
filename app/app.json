@@ -47,7 +47,8 @@
     "scheme": "sandygram",
     "plugins": [
       "expo-notifications",
-      "expo-audio"
+      "expo-audio",
+      "@react-native-google-signin/google-signin"
     ],
     "notification": {
       "color": "#0a0a0a"

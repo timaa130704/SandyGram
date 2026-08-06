@@ -4,6 +4,7 @@ import { initializeApp } from "https://www.gstatic.com/firebasejs/10.14.1/fireba
 import {
   getAuth, connectAuthEmulator, createUserWithEmailAndPassword,
   signInWithEmailAndPassword, signOut, onAuthStateChanged, deleteUser,
+  GoogleAuthProvider, signInWithPopup,
 } from "https://www.gstatic.com/firebasejs/10.14.1/firebase-auth.js";
 import {
   getFirestore, connectFirestoreEmulator, doc, getDoc, getDocs, setDoc, updateDoc,
@@ -210,6 +211,44 @@ $("#logoutButton").addEventListener("click", async () => {
   await signOut(auth);
 });
 
+// ---------- вход через Google ----------
+$("#googleButton").addEventListener("click", async () => {
+  try { await signInWithPopup(auth, new GoogleAuthProvider()); }
+  catch (error) {
+    if (!(error?.code || "").includes("popup-closed")) $("#authError").textContent = ruError(error);
+  }
+});
+
+// Первый вход через Google: аккаунта в базе ещё нет — просим выбрать @username
+function promptNewUsername(user) {
+  return new Promise((resolve) => {
+    const suggest = (user.email || "user").split("@")[0].toLowerCase().replace(/[^a-z0-9_]/g, "").slice(0, 20) || "user";
+    openModal(`<h3>Придумайте @username</h3>
+      <p class="muted" style="font-size:13px;margin-bottom:10px">Вы вошли через Google. Осталось выбрать имя, по которому вас смогут найти.</p>
+      <label class="field"><span>Username</span><input id="pickUsername" maxlength="24" value="${escapeHtml(suggest)}" autocapitalize="off" /></label>
+      <p class="error" id="pickError"></p>
+      <div class="modal-actions"><button class="cancel">Выйти</button><button class="confirm">Готово</button></div>`);
+    $("#modal .cancel").addEventListener("click", () => { closeModal(); resolve(null); });
+    $("#modal .confirm").addEventListener("click", async () => {
+      const name = $("#pickUsername").value.trim().toLowerCase().replace(/^@/, "");
+      if (!/^[a-z0-9_]{3,24}$/.test(name)) { $("#pickError").textContent = "3–24 символа: латиница, цифры и _"; return; }
+      try {
+        const taken = await getDoc(doc(dbf, "usernames", name));
+        if (taken.exists() && taken.data().uid !== user.uid) { $("#pickError").textContent = "Это имя уже занято."; return; }
+        const profile = {
+          username: name, displayName: (user.displayName || name).slice(0, 40), bio: "",
+          avatarColor: Math.floor(Math.random() * 7), createdAt: Date.now(), lastSeen: Date.now(),
+        };
+        if (user.photoURL) profile.avatar = user.photoURL;
+        await setDoc(doc(dbf, "usernames", name), { uid: user.uid, email: user.email || emailFor(name), google: true });
+        await setDoc(doc(dbf, "users", user.uid), profile);
+        await setDoc(doc(dbf, "chats", `saved_${user.uid}`), { type: "saved", members: [user.uid], createdAt: Date.now(), lastRead: {}, unread: {}, pinnedBy: [], muted: [] }).catch(() => {});
+        closeModal(); resolve(profile);
+      } catch (error) { $("#pickError").textContent = ruError(error); }
+    });
+  });
+}
+
 // Восстановление профиля, если регистрация когда-то оборвалась на полпути:
 // имя находим по uid в реестре usernames и создаём недостающие документы
 async function recoverProfile(uid) {
@@ -234,7 +273,8 @@ onAuthStateChanged(auth, async (user) => {
     else await new Promise(r => setTimeout(r, 600));
   }
   if (!profile) profile = await recoverProfile(user.uid); // оборванная регистрация — чиним
-  if (!profile) { await signOut(auth); toast("Не удалось загрузить профиль. Попробуйте войти ещё раз."); return; }
+  if (!profile) profile = await promptNewUsername(user);  // новый вход через Google — выбираем имя
+  if (!profile) { await signOut(auth); return; }
   me = { uid: user.uid, ...profile };
   showMessenger();
 });
