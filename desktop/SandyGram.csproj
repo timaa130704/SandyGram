@@ -6,12 +6,14 @@
     <Nullable>enable</Nullable>
     <ImplicitUsings>enable</ImplicitUsings>
     <UseWPF>true</UseWPF>
-  </PropertyGroup>
+      <ApplicationIcon>icon.ico</ApplicationIcon>
+    </PropertyGroup>
 
   <ItemGroup>
     <Resource Include="Fonts/GoogleSans-Regular.ttf" />
     <Resource Include="Fonts/GoogleSans-Medium.ttf" />
     <Resource Include="Fonts/GoogleSans-Bold.ttf" />
+      <Resource Include="icon.ico" />
   </ItemGroup>
 
   <ItemGroup>

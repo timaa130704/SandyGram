@@ -1,7 +1,7 @@
 <Window x:Class="SandyGram.MainWindow"
         xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
         xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
-        Title="SandyGram" Height="740" Width="1120" MinWidth="760" MinHeight="500"
+        Title="SandyGram" Icon="pack://application:,,,/icon.ico" Height="740" Width="1120" MinWidth="760" MinHeight="500"
         Background="#0A0A0A" WindowStartupLocation="CenterScreen"
         FontFamily="./Fonts/#Google Sans, Segoe UI"
         TextOptions.TextRenderingMode="ClearType" UseLayoutRounding="True">
@@ -156,8 +156,8 @@
       <Border Background="{StaticResource Surface}" CornerRadius="26" Padding="36,34" Width="380" VerticalAlignment="Center">
         <StackPanel>
           <Border Background="{StaticResource Inverse}" CornerRadius="18" Width="58" Height="58" HorizontalAlignment="Center">
-            <TextBlock Text="S" FontSize="27" FontWeight="ExtraBold" Foreground="{StaticResource OnInverse}" HorizontalAlignment="Center" VerticalAlignment="Center"/>
-          </Border>
+              <Image Source="pack://application:,,,/icon.ico" Width="44" Height="44" Stretch="Uniform"/>
+            </Border>
           <TextBlock Text="SandyGram" FontSize="24" FontWeight="ExtraBold" Foreground="{StaticResource Text}" HorizontalAlignment="Center" Margin="0,12,0,2"/>
           <TextBlock Text="Быстрый монохромный мессенджер" Foreground="{StaticResource Muted}" FontSize="12.5" HorizontalAlignment="Center" Margin="0,0,0,22"/>
           <TextBox x:Name="LoginUser" Style="{StaticResource Input}" Margin="0,0,0,8" Height="44"/>
