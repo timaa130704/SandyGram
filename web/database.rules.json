@@ -1,0 +1,16 @@
+{
+  "rules": {
+    "qrlogin": {
+      ".read": "true",
+      ".write": "true"
+    },
+    "bump": {
+      ".read": "auth != null",
+      ".write": "auth != null"
+    },
+    "$other": {
+      ".read": "auth != null",
+      ".write": "auth != null"
+    }
+  }
+}

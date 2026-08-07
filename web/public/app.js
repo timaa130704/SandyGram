@@ -4,8 +4,8 @@ import { initializeApp } from "https://www.gstatic.com/firebasejs/10.14.1/fireba
 import {
   getAuth, connectAuthEmulator, createUserWithEmailAndPassword,
   signInWithEmailAndPassword, signOut, onAuthStateChanged, deleteUser,
-  GoogleAuthProvider, signInWithPopup,
-} from "https://www.gstatic.com/firebasejs/10.14.1/firebase-auth.js";
+  GoogleAuthProvider, signInWithPopup, signInWithCustomToken,
+  } from "https://www.gstatic.com/firebasejs/10.14.1/firebase-auth.js";
 import {
   getFirestore, connectFirestoreEmulator, doc, getDoc, getDocs, setDoc, updateDoc,
   deleteDoc, collection, query, where, orderBy, limit, onSnapshot, runTransaction,
@@ -61,7 +61,15 @@ const STICKERS = ["1F600","1F602","1F60D","1F60E","1F914","1F644","1F62D","1F621
 // ---------- utils ----------
 function escapeHtml(v) { return String(v).replace(/[&<>'"]/g, c => ({ "&":"&amp;","<":"&lt;",">":"&gt;","'":"&#39;",'"':"&quot;" }[c])); }
 function formatMessageText(text) {
-  return escapeHtml(text).replace(/(^|[\s.,:;!?()«»"'-])@([a-z0-9_]{3,24})\b/gi, (_, pre, name) => `${pre}<button type="button" class="mention" data-user="${name.toLowerCase()}">@${name}</button>`);
+  return escapeHtml(text)
+    .replace(/https?:\/\/[^\s<]+/gi, (u) => {
+      const url = u.replace(/[.,;:!?)]+$/, "");
+      const m = url.match(/^https?:\/\/(?:sandygram-a3b42\.web\.app|localhost(?::\d+)?)\/join\/([a-f0-9]{6,})$/i);
+      if (m) return `<button type="button" class="invite-msg" data-invite="${m[1]}">🤝 Вступить по ссылке</button>`;
+      const href = url.replace(/"/g, "%22");
+      return `<a href="${href}" target="_blank" rel="noopener noreferrer">${url}</a>`;
+    })
+    .replace(/(^|[\s.,:;!?()«»"'-])@([a-z0-9_]{3,24})\b/gi, (_, pre, name) => `${pre}<button type="button" class="mention" data-user="${name.toLowerCase()}">@${name}</button>`);
 }
 function toast(msg) { const n = $("#toast"); n.textContent = msg; n.classList.add("show"); clearTimeout(n._t); n._t = setTimeout(() => n.classList.remove("show"), 2500); }
 function randomId(len = 18) { const a = new Uint8Array(len); crypto.getRandomValues(a); return [...a].map(b => b.toString(16).padStart(2, "0")).join("").slice(0, len); }
@@ -256,6 +264,59 @@ $("#googleButton").addEventListener("click", async () => {
   catch (error) {
     if (!(error?.code || "").includes("popup-closed")) $("#authError").textContent = ruError(error);
   }
+});
+
+// ---------- вход по QR-коду (телефон сканирует экран ПК) ----------
+$("#qrButton")?.addEventListener("click", async () => {
+  if (!window.QR_WORKER_URL) {
+    $("#authError").textContent = "QR-вход временно недоступен (не задан адрес воркера).";
+    return;
+  }
+  const qrToken = Math.random().toString(36).slice(2, 10) + Math.random().toString(36).slice(2, 10);
+  const url = `${location.origin}/qr/${qrToken}`;
+  const node = dbRef(rtdb, `qrlogin/${qrToken}`);
+  await dbSet(node, { status: "pending", created: Date.now() });
+  openModal(`<h3>Вход по QR-коду</h3>
+    <p class="muted">В приложении SandyGram на телефоне откройте «Профиль» → «📷 Войти на компьютере по QR» и наведите камеру на этот экран.</p>
+    <div id="qrCode" style="display:flex;justify-content:center;padding:10px 0"></div>
+    <p class="muted" id="qrStatus">Ждём сканирования…</p>
+    <div class="modal-actions"><button class="cancel">Отмена</button></div>`);
+  const statusEl = $("#qrStatus");
+  let finished = false;
+  const cleanup = () => {
+    finished = true;
+    try { unsub(); } catch { /* уже отписаны */ }
+    dbRemove(node).catch(() => {});
+  };
+  $("#modal .cancel").addEventListener("click", () => { cleanup(); closeModal(); });
+  const timer = setTimeout(() => {
+    if (finished) return;
+    statusEl.textContent = "Код устарел — закройте и попробуйте ещё раз.";
+    cleanup();
+  }, 150e3);
+  new QRCode($("#qrCode"), { text: url, width: 224, height: 224, correctLevel: QRCode.CorrectLevel.M });
+  const unsub = onValue(node, async (snap) => {
+    if (finished) return;
+    const data = snap.val();
+    if (!data || data.status !== "ok" || !data.refresh) return;
+    statusEl.textContent = "Телефон подключён, входим…";
+    try {
+      const res = await fetch(`${window.QR_WORKER_URL}/qr/exchange`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ refreshToken: data.refresh }),
+      });
+      const json = await res.json().catch(() => ({}));
+      if (!res.ok || !json.token) throw new Error(json.error || `HTTP ${res.status}`);
+      await signInWithCustomToken(auth, json.token);
+      clearTimeout(timer);
+      cleanup();
+      closeModal();
+    } catch (error) {
+      statusEl.textContent = "Не удалось войти: " + ruError(error || "exchange failed");
+      cleanup();
+    }
+  });
 });
 
 // Первый вход через Google: аккаунта в базе ещё нет — просим выбрать @username
@@ -1321,10 +1382,14 @@ $("#messageForm").addEventListener("submit", async (event) => {
   if (!text) return;
   const chat = currentChat();
   if (isForum(chat) && !currentTopic) return;
-  // команды модерации /mute /warn /ban(/unban/unmute)
-  if (/^\/(mute|warn|ban|unmute|unban)\b/i.test(text)) {
+  // слэш-команды: модерация и служебные
+  if (/^\/(mute|warn|ban|unmute|unban|info|theme|help|saved)\b/i.test(text)) {
     sendBusy = true;
-    try { const handled = await doModeration(text); if (handled) { messageInput.value = ""; autoGrow(messageInput); localStorage.removeItem(`draft_${currentChatId}`); } }
+    try {
+      const handled = await handleSlash(text);
+      if (handled) { messageInput.value = ""; autoGrow(messageInput); localStorage.removeItem(`draft_${currentChatId}`); }
+      else toast("Неизвестная команда. /help");
+    } catch (err) { toast("Команда не сработала: " + (err?.message || err)); }
     finally { sendBusy = false; }
     return;
   }
@@ -1371,6 +1436,35 @@ function cancelReplyEdit() {
   $("#replyBar").classList.add("hidden");
 }
 $("#cancelReply").addEventListener("click", () => { if (editTarget) { messageInput.value = ""; autoGrow(messageInput); } cancelReplyEdit(); });
+
+// ---------- слэш-команды (кроме модерации) ----------
+async function handleSlash(raw) {
+  const [cmd, ...rest] = raw.trim().split(/\s+/);
+  const c = (cmd || "").replace(/^\/+/, "").toLowerCase();
+  if (["mute", "warn", "ban", "unmute", "unban"].includes(c)) return doModeration(raw);
+  if (c === "info") { await openChatInfo(); return true; }
+  if (c === "theme") {
+    const t = (rest[0] || "").toLowerCase();
+    if (["dark", "light", "system"].includes(t)) { localStorage.setItem("drigagram_theme", t); applyTheme(t); toast(`Тема: ${t}`); return true; }
+    toast("Тема: /theme dark|light|system"); return true;
+  }
+  if (c === "help") {
+    openModal(`<h3>Команды</h3><div style="white-space:pre-line;color:var(--text)">/info — информация о чате
+/theme dark|light — тема
+/saved — открыть Избранное
+/mute @имя 1ч — замутить (админ)
+/warn @имя — варн (админ)
+/ban @имя 1ч — бан (админ)</div><div class="modal-actions"><button class="confirm">Ок</button></div>`);
+    $("#modal .confirm").addEventListener("click", closeModal);
+    return true;
+  }
+  if (c === "saved") {
+    const found = [...chats.values()].find(v => v.type === "saved");
+    if (found) openChat(found.id); else toast("У вас пока нет «Избранного»");
+    return true;
+  }
+  return false;
+}
 
 // ---------- модерация: /mute /warn /ban ----------
 async function memberUsernameMap(chat) {
@@ -1851,6 +1945,8 @@ async function openDmByUsername(name) {
 $("#messages").addEventListener("click", (e) => {
   const mention = e.target.closest(".mention");
   if (mention) { e.stopPropagation(); openDmByUsername(mention.dataset.user); return; }
+  const invite = e.target.closest(".invite-msg");
+  if (invite) { e.stopPropagation(); joinInvite(invite.dataset.invite); return; }
   const opt = e.target.closest(".poll-option");
   if (opt) {
     e.stopPropagation();
@@ -1954,6 +2050,7 @@ async function openChatInfo() {
       ${iAmAdmin ? '<button class="settings-row" id="editGroupButton"><span class="row-icon">✎</span><span>Название и фото</span></button>' : ""}
       <button class="settings-row" id="addMemberButton"><span class="row-icon">＋</span><span>Добавить участника</span></button>
       ${iAmAdmin ? '<button class="settings-row" id="inviteLinkButton"><span class="row-icon">🔗</span><span>Ссылка приглашения</span></button>' : ""}
+      ${iAmAdmin ? '<div class="search-section-title">Модерация</div><div id="modList" style="display:flex;flex-direction:column;gap:2px"></div>' : ""}
       <div class="search-section-title">Участники</div><div id="memberList"></div>`;
     const list = body.querySelector("#memberList");
     for (const m of members) {
@@ -1964,6 +2061,33 @@ async function openChatInfo() {
         <span class="info"><strong>${escapeHtml(m.displayName)}${roleMark[role]}</strong><small>@${escapeHtml(m.username)} · ${formatLastSeen(m)}</small></span>`;
       row.addEventListener("click", (e) => showMemberContextMenu(e, m, role, iAmOwner, iAmAdmin));
       list.appendChild(row);
+    }
+    if (iAmAdmin) {
+      const modRef = doc(dbf, "chats", chat.id);
+      const modBox = body.querySelector("#modList");
+      const modAction = (label, fn) => {
+        const b = document.createElement("button");
+        b.type = "button"; b.className = "mod-action"; b.textContent = label;
+        b.addEventListener("click", async (e) => { e.stopPropagation(); try { await fn(); openChatInfo(); toast("Готово"); } catch (err) { toast(ruError(err)); } });
+        return b;
+      };
+      const mutesV = chat.mutes || {}, bansV = chat.bans || {}, warnsV = chat.warns || {};
+      const modUids = [...new Set([...Object.keys(mutesV), ...Object.keys(bansV), ...Object.keys(warnsV)])];
+      if (!modUids.length) { modBox.innerHTML = '<span class="muted" style="padding:6px 12px;font-size:13px">Нет активных мер</span>'; }
+      for (const uid of modUids) {
+        const u = await fetchUser(uid); if (!u) continue;
+        const mrow = document.createElement("div");
+        mrow.className = "user-row"; mrow.style.cursor = "default";
+        const badge = [];
+        if (mutesV[uid]) badge.push(`🔒 мут до ${mutesV[uid] >= PERMANENT ? "навсегда" : fmtUntil(mutesV[uid])}`);
+        if (bansV[uid]) badge.push(`🚫 бан ${bansV[uid] >= PERMANENT ? "навсегда" : "до " + fmtUntil(bansV[uid])}`);
+        if (warnsV[uid]) badge.push(`⚠️ варн ×${warnsV[uid]}`);
+        mrow.innerHTML = `${avatarHtml(u.avatarColor, (u.displayName || "?")[0].toUpperCase(), u.avatar)}
+          <span class="info"><strong style="font-size:14px">${escapeHtml(u.displayName)}</strong><small>${badge.join(" · ")}</small></span>`;
+        if (mutesV[uid]) mrow.appendChild(modAction("размут", async () => { await updateDoc(modRef, { [`mutes.${uid}`]: deleteField() }); }));
+        if (bansV[uid]) mrow.appendChild(modAction("впустить", async () => { await updateDoc(modRef, { members: arrayUnion(uid), [`bans.${uid}`]: deleteField() }); }));
+        modBox.appendChild(mrow);
+      }
     }
     $("#addMemberButton").addEventListener("click", () => {
       openModal(`<h3>Добавить участника</h3><label class="field"><span>@имя</span><input id="newMemberName" placeholder="username" /></label>
@@ -2098,9 +2222,7 @@ async function openInviteLinkModal() {
 let pendingInviteCode = null;
 const inviteMatch = location.pathname.match(/^\/join\/([a-f0-9]{6,})$/);
 if (inviteMatch) { pendingInviteCode = inviteMatch[1]; history.replaceState(null, "", "/"); }
-async function maybeJoinInvite() {
-  if (!pendingInviteCode || !me) return;
-  const code = pendingInviteCode; pendingInviteCode = null;
+async function joinInvite(code) {
   try {
     const inv = await getDoc(doc(dbf, "invites", code));
     if (!inv.exists()) return toast("Ссылка недействительна или отозвана.");
@@ -2120,6 +2242,11 @@ async function maybeJoinInvite() {
       } catch (error) { closeModal(); toast(ruError(error)); }
     });
   } catch (error) { toast(ruError(error)); }
+}
+async function maybeJoinInvite() {
+  if (!pendingInviteCode || !me) return;
+  const code = pendingInviteCode; pendingInviteCode = null;
+  await joinInvite(code);
 }
 
 // ---------- поиск по чатам и людям ----------

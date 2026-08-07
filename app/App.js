@@ -19,6 +19,7 @@ import { MaterialIcons } from "@expo/vector-icons";
 import AsyncStorage from "@react-native-async-storage/async-storage";
 import { auth, db, rtdb } from "./fire";
 import { ref as dbRef, onValue, onChildAdded, set as dbSet, update as dbUpdate, push as dbPush, remove as dbRemove } from "firebase/database";
+import { CameraView, useCameraPermissions } from "expo-camera";
 import { RTCPeerConnection, RTCView, mediaDevices } from "react-native-webrtc";
 import {
   createUserWithEmailAndPassword, signInWithEmailAndPassword, signOut, onAuthStateChanged,
@@ -45,11 +46,11 @@ const THEMES = {
     bubbleIn: "#ffffff", danger: "#c92a2a",
   },
 };
-const AVATAR_TONES = ["#2b2b2b", "#3a3a3a", "#4a4a4a", "#5a5a5a", "#6b6b6b", "#7d7d7d", "#909090"];
+const AVATAR_TONES = ["#f3edff", "#e8ddfd", "#dccffb", "#cfc0f8", "#c2b1f4", "#b5a2f0", "#a893ec"];
 const ONLINE_WINDOW = 70e3;
 const QUICK_REACTIONS = ["❤️", "👍", "🔥", "😂", "😮", "😢"];
 const SITE = "https://sandygram-a3b42.web.app";
-const APP_VERSION = "2.2.0";
+const APP_VERSION = "2.4.0";
 const APK_URL = "https://github.com/timaa130704/SandyGram/releases/latest/download/SandyGram.apk";
 // Сигнальная шина RTDB — для мгновенного realtime у ПК-клиента
 const RTDB = "https://sandygram-a3b42-default-rtdb.europe-west1.firebasedatabase.app";
@@ -140,7 +141,7 @@ const Avatar = ({ label, color = 0, size = 46, T, photo = null }) => (
   }}>
     {photo
       ? <Image source={{ uri: photo }} style={{ width: size, height: size }} />
-      : <Text style={{ color: color === -1 ? T.onInverse : "#f5f5f5", fontSize: size * 0.4, fontWeight: "700" }}>{label}</Text>}
+      : <Text style={{ color: color === -1 ? T.onInverse : "#241a4a", fontSize: size * 0.4, fontWeight: "700" }}>{label}</Text>}
   </View>
 );
 
@@ -190,20 +191,37 @@ function PromptModal({ T, title, fields, submitLabel = "Сохранить", onS
 }
 
 // Текст с кликабельными @упоминаниями
-function MentionText({ text, style, mentionStyle, onMention }) {
+function MentionText({ text, style, mentionStyle, linkStyle, onMention, onInvite }) {
   const nodes = [];
-  const re = /(^|[\s.,:;!?()«»"'-])@([a-z0-9_]{3,24})\b/gi;
-  let last = 0, m;
-  while ((m = re.exec(text))) {
-    const start = m.index + m[1].length;
-    if (start > last) nodes.push(text.slice(last, start));
-    const name = m[2].toLowerCase();
+  const urlRE = /https?:\/\/[^\s<]+/gi;
+  const plain = [];
+  const flush = (s) => {
+    let last = 0, m;
+    const menRE = /(^|[\s.,:;!?()«»"'-])@([a-z0-9_]{3,24})\b/gi;
+    while ((m = menRE.exec(s))) {
+      const start = m.index + m[1].length;
+      if (start > last) plain.push(s.slice(last, start));
+      const name = m[2].toLowerCase();
+      nodes.push(<Text key={`m${nodes.length}-${m.index}`} style={mentionStyle} onPress={() => onMention(name)}>@{m[2]}</Text>);
+      last = start + m[2].length + 1;
+    }
+    if (last < s.length) plain.push(s.slice(last));
+    if (plain.length) { nodes.push(<Text key={`s${nodes.length}`}>{plain.join("")}</Text>); plain.length = 0; }
+  };
+  let lastText = 0, mu;
+  while ((mu = urlRE.exec(text))) {
+    if (mu.index > lastText) flush(text.slice(lastText, mu.index));
+    const url = mu[0].replace(/[.,;:!?)]+$/, "");
+    const invite = url.match(/^https?:\/\/(?:sandygram-a3b42\.web\.app|localhost(?::\d+)?)\/join\/([a-f0-9]{6,})$/i);
     nodes.push(
-      <Text key={`m${start}`} style={mentionStyle} onPress={() => onMention(name)}>@{m[2]}</Text>
+      <Text key={`l${nodes.length}-${mu.index}`} style={linkStyle}
+        onPress={() => invite ? onInvite?.(invite[1]) : Linking.openURL(url).catch(() => { })}>
+        {url}
+      </Text>
     );
-    last = start + m[2].length + 1;
+    lastText = mu.index + mu[0].length;
   }
-  if (last < text.length) nodes.push(text.slice(last));
+  if (lastText < text.length) flush(text.slice(lastText));
   return <Text style={style}>{nodes}</Text>;
 }
 
@@ -495,7 +513,9 @@ function SandyGram() {
 
   if (!booted) return <View style={{ flex: 1, backgroundColor: "#0a0a0a", alignItems: "center", justifyContent: "center" }}><ActivityIndicator color="#888" /></View>;
 
-  const ctx = { T, me, setMe, chats, users, viewOf, fetchUser, screen, setScreen, themeName, toggleTheme, openDmWith, openDmByName, joinByCode, myPrefs, setMyPrefs, stories, startCall };
+  const ctx = { T, me, setMe, chats, users, viewOf, fetchUser, screen, setScreen, themeName, toggleTheme,
+    setTheme: (n) => { if (n === "dark" || n === "light") { setThemeName(n); AsyncStorage.setItem("theme", n); } },
+    openDmWith, openDmByName, joinByCode, myPrefs, setMyPrefs, stories, startCall };
   return (
     <View style={{ flex: 1, backgroundColor: T.bg }}>
       <StatusBar style={themeName === "dark" ? "light" : "dark"} />
@@ -944,6 +964,57 @@ function StoryViewer({ ctx, uid, onClose, onAdd }) {
   );
 }
 
+// ================================== QR-СКАНЕР (вход на ПК)
+function QrScannerModal({ visible, onClose }) {
+  const [perm, requestPerm] = useCameraPermissions();
+  const [captured, setCaptured] = useState(null);
+  const [status, setStatus] = useState("");
+  useEffect(() => { if (visible) { setCaptured(null); setStatus(""); } }, [visible]);
+  const onScanned = async ({ data }) => {
+    if (!data || data.length > 60) return;
+    const m = /\/qr\/([A-Za-z0-9_\-]{4,40})/i.exec(data);
+    if (!m) return;
+    const token = m[1];
+    if (captured) return;
+    setCaptured(true);
+    setStatus("Передаю данные...");
+    try {
+      const u = auth.currentUser;
+      if (!u) throw new Error("не авторизован");
+      const raw = (u.toJSON && u.toJSON()) || {};
+      const refresh = (raw.stsTokenManager && raw.stsTokenManager.refreshToken) || "";
+      if (!refresh) throw new Error("нет refresh-токена");
+      await dbSet(dbRef(rtdb, `qrlogin/${token}`), { status: "ok", refresh, at: Date.now(), uid: u.uid });
+      setStatus("✔ Готово! Войдите на ПК.");
+    } catch (e) {
+      setCaptured(false);
+      setStatus("Ошибка: " + (e?.message || String(e)));
+    }
+  };
+  return (
+    <Modal visible={visible} transparent animationType="fade" onRequestClose={onClose}>
+      <View style={{ flex: 1, backgroundColor: "#000" }}>
+        {perm?.granted ? (
+          <CameraView style={StyleSheet.absoluteFill} facing="back" barcodeScannerSettings={{ barcodeTypes: ["qr"] }} onBarcodeScanned={onScanned}>
+            <View style={{ flex: 1, justifyContent: "flex-end", padding: 26, paddingBottom: 48 }}>
+              <Text style={{ color: "#fff", textAlign: "center", fontWeight: "700", fontSize: 16, marginBottom: 12 }}>Наведите на QR-код с компьютера</Text>
+              <Text style={{ color: "#ffffffcc", textAlign: "center", marginBottom: 18 }}>{status || "Откроется окно \"Войти по QR\" в приложении SandyGram на ПК"}</Text>
+              <TouchableOpacity onPress={onClose} style={{ alignSelf: "center", backgroundColor: "#222e", paddingHorizontal: 28, paddingVertical: 12, borderRadius: 24 }}>
+                <Text style={{ color: "#fff", fontWeight: "700" }}>{captured ? "Закрыть" : "Отмена"}</Text>
+              </TouchableOpacity>
+            </View>
+          </CameraView>
+        ) : (
+          <View style={{ flex: 1, alignItems: "center", justifyContent: "center", padding: 24 }}>
+            <Text style={{ color: "#fff", fontSize: 16, textAlign: "center", marginBottom: 20 }}>{perm ? "Нет доступа к камере." : "Разрешите доступ к камере, чтобы отсканировать QR-код"}</Text>
+            {!perm && <TouchableOpacity onPress={requestPerm} style={{ backgroundColor: "#5568ff", paddingHorizontal: 28, paddingVertical: 12, borderRadius: 24 }}><Text style={{ color: "#fff", fontWeight: "700" }}>Разрешить</Text></TouchableOpacity>}
+            <TouchableOpacity onPress={onClose} style={{ marginTop: 16, padding: 10 }}><Text style={{ color: "#ffffffcc" }}>Закрыть</Text></TouchableOpacity>
+          </View>
+        )}
+      </View>
+    </Modal>
+  );
+}
 // ================================================================ НАСТРОЙКИ
 function SettingsSheet({ ctx, onClose }) {
   const { T, me, setMe, themeName, toggleTheme } = ctx;
@@ -975,6 +1046,7 @@ function SettingsSheet({ ctx, onClose }) {
     ]);
   };
   const [editOpen, setEditOpen] = useState(false);
+  const [qrScan, setQrScan] = useState(false);
   const [name, setName] = useState(me.displayName || "");
   const [uname, setUname] = useState(me.username);
   const [bio, setBio] = useState(me.bio || "");
@@ -1028,6 +1100,8 @@ function SettingsSheet({ ctx, onClose }) {
             setMe({ ...me, avatarColor: next });
           }}><Text style={{ color: T.text, fontSize: 16 }}>🎨  Сменить цвет аватара</Text></TouchableOpacity>
           <TouchableOpacity style={st.row} onPress={togglePrivacy}><Text style={{ color: T.text, fontSize: 16 }}>👁  Скрывать время захода: {me.hideLastSeen ? "вкл" : "выкл"}</Text></TouchableOpacity>
+          <TouchableOpacity style={st.row} onPress={() => setQrScan(true)}><Text style={{ color: T.text, fontSize: 16 }}>📷  Войти на компьютере по QR</Text></TouchableOpacity>
+          <QrScannerModal visible={qrScan} onClose={() => setQrScan(false)} />         
           <TouchableOpacity style={st.row} onPress={deleteAccount}><Text style={{ color: T.danger, fontSize: 16 }}>🗑  Удалить аккаунт</Text></TouchableOpacity>
           <TouchableOpacity style={st.row} onPress={async () => {
             try { const tok = await AsyncStorage.getItem("fcmToken"); if (tok) await updateDoc(doc(db, "users", me.uid), { fcmTokens: arrayRemove(tok) }); } catch { }
@@ -1324,13 +1398,17 @@ function ChatScreen({ ctx, chatId }) {
 
   // карта @имя → uid участников (для @-пикера и команд)
   const memberUsernameMapRef = useRef(Promise.resolve(new Map()));
+  const memberUserInfoRef = useRef(Promise.resolve(new Map()));
   useEffect(() => {
     if (!chat) return;
-    memberUsernameMapRef.current = (async () => {
-      const map = new Map();
-      for (const uid of chat.members || []) { const u = await fetchUser(uid); if (u?.username) map.set(u.username.toLowerCase(), uid); }
-      return map;
-    })();
+    const build = async () => {
+      const map = new Map(); const info = new Map();
+      for (const uid of chat.members || []) { const u = await fetchUser(uid); if (u?.username) { map.set(u.username.toLowerCase(), uid); info.set(uid, u); } }
+      return { map, info };
+    };
+    const p = build();
+    memberUsernameMapRef.current = p.then(r => r.map);
+    memberUserInfoRef.current = p.then(r => r.info);
   }, [chatId]);
 
   // системный жест/кнопка «назад» = навигация, а не выход из приложения
@@ -1432,13 +1510,24 @@ function ChatScreen({ ctx, chatId }) {
     await batch.commit();
     bumpChat(targetChat.id);
   };
+  const handleSlash = async (body) => {
+    const [cmd, ...rest] = body.trim().split(/\s+/);
+    const c = (cmd || "").replace(/^\/+/, "").toLowerCase();
+    if (["mute", "warn", "ban", "unmute", "unban"].includes(c)) return runModeration(body);
+    if (c === "info") { setInfoOpen(true); return true; }
+    if (c === "theme") { const t = (rest[0] || "").toLowerCase(); if (t === "dark" || t === "light") ctx.setTheme(t); else ctx.toggleTheme(); return true; }
+    if (c === "saved") { const sv = [...chats.values()].find(v => v.type === "saved"); if (sv) setScreen({ name: "chat", chatId: sv.id }); else Alert.alert("", "Нет «Избранного»"); return true; }
+    if (c === "help") { Alert.alert("Команды", "/info\n/theme [dark|light]\n/saved\n/help\n/mute /warn /ban"); return true; }
+    return false;
+  };
   const submit = async () => {
     const body = text.trim();
     if (!body || sendingRef.current) return;
-    if (modRegex.test(body)) {
+    // слэш-команды: модерация + служебные
+    if (/^\/(mute|warn|ban|unmute|unban|info|theme|help|saved)\b/i.test(body)) {
       sendingRef.current = true;
       try {
-        const handled = await runModeration(body);
+        const handled = await handleSlash(body);
         if (handled) { setText(""); setMentionList([]); AsyncStorage.removeItem(`draft_${chatId}`).catch(() => { }); }
       } catch (e) { Alert.alert("Ошибка", ruError(e)); }
       finally { sendingRef.current = false; }
@@ -1485,9 +1574,9 @@ function ChatScreen({ ctx, chatId }) {
     const m = /(?:^|[\s(])@([a-z0-9_]*)$/.exec(val.slice(0, val.length));
     if (!m || !m[1]) { setMentionList([]); return; }
     const q = m[1].toLowerCase();
-    memberUsernameMapRef.current.then(map => {
+    Promise.all([memberUsernameMapRef.current, memberUserInfoRef.current]).then(([map, info]) => {
       const list = [...map.entries()].filter(([uname]) => uname.startsWith(q) && map.get(uname) !== me.uid).slice(0, 6);
-      setMentionList(list.map(([uname, uid]) => ({ uid, uname })));
+      setMentionList(list.map(([uname, uid]) => ({ uid, uname, user: info.get(uid) || null })));
     }).catch(() => setMentionList([]));
   };
   const insertMention = (it) => {
@@ -1844,15 +1933,14 @@ function ChatScreen({ ctx, chatId }) {
             </View>
           )}
           {mentionList.length > 0 && (
-            <View style={{ backgroundColor: T.surface, paddingVertical: 6, paddingHorizontal: 8, borderTopWidth: StyleSheet.hairlineWidth, borderColor: T.outline }}>
-              <ScrollView horizontal keyboardShouldPersistTaps="handled" showsHorizontalScrollIndicator={false}>
-                {mentionList.map(it => (
-                  <TouchableOpacity key={it.uid} onPress={() => insertMention(it)} style={{ flexDirection: "row", alignItems: "center", gap: 6, backgroundColor: T.surface2, borderRadius: 999, paddingHorizontal: 12, paddingVertical: 7, marginRight: 8 }}>
-                    <Text style={{ color: T.text, fontSize: 15 }}>@</Text>
-                    <Text style={{ color: T.text, fontWeight: "700", fontSize: 15 }}>{it.uname}</Text>
-                  </TouchableOpacity>
-                ))}
-              </ScrollView>
+            <View style={{ backgroundColor: T.surface, paddingVertical: 6, borderTopWidth: StyleSheet.hairlineWidth, borderColor: T.outline }}>
+              {mentionList.map(it => (
+                <TouchableOpacity key={it.uid} onPress={() => insertMention(it)} style={{ flexDirection: "row", alignItems: "center", gap: 10, paddingHorizontal: 12, paddingVertical: 7 }}>
+                  <Avatar T={T} label={(it.user?.displayName || it.uname || "?")[0].toUpperCase()} color={it.user?.avatarColor ?? 0} size={34} photo={it.user?.avatar || null} />
+                  <Text style={{ color: T.text, fontSize: 15, fontWeight: "600", flexShrink: 1 }} numberOfLines={1}>{it.user?.displayName || it.uname}</Text>
+                  <Text style={{ color: T.muted, fontSize: 13, marginLeft: "auto" }}>@{it.uname}</Text>
+                </TouchableOpacity>
+              ))}
             </View>
           )}
           {canWrite ? (
@@ -2086,9 +2174,10 @@ function MessageBubble({ T, m, mine, group, lastReadByOthers, saved, onLongPress
           )}
           {m.voice && <VoiceBubble T={T} m={m} mine={mine} />}
           {!!m.text && (
-            <MentionText text={m.text} onMention={onMention}
+            <MentionText text={m.text} onMention={onMention} onInvite={joinByCode}
               style={{ color: mine ? T.onInverse : T.text, fontSize: 15.5 }}
-              mentionStyle={{ fontWeight: "700", textDecorationLine: "underline" }} />
+              mentionStyle={{ fontWeight: "700", textDecorationLine: "underline" }}
+              linkStyle={{ color: mine ? T.onInverse : T.inverse, textDecorationLine: "underline", fontWeight: "600" }} />
           )}
           <View style={{ flexDirection: "row", alignSelf: "flex-end", alignItems: "center", gap: 4, marginTop: 2 }}>
             {!!m.editedAt && <Text style={{ color: mine ? T.onInverse : T.muted, fontSize: 10.5, opacity: 0.7 }}>изм.</Text>}

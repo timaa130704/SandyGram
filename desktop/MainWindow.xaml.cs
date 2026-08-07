@@ -1,6 +1,7 @@
 // SandyGram Desktop — нативный Windows-клиент (WPF), общий Firebase с сайтом и приложением
 using System;
 using System.Collections.Generic;
+using System.Diagnostics;
 using System.IO;
 using System.Linq;
 using System.Text.Json;
@@ -8,6 +9,7 @@ using System.Text.Json.Nodes;
 using System.Threading.Tasks;
 using System.Windows;
 using System.Windows.Controls;
+using System.Windows.Documents;
 using System.Windows.Input;
 using System.Windows.Media;
 using System.Windows.Media.Imaging;
@@ -18,7 +20,7 @@ namespace SandyGram;
 public partial class MainWindow : Window
 {
     const string Site = "https://sandygram-a3b42.web.app";
-    static readonly string[] AvatarTones = { "#2B2B2B", "#3A3A3A", "#4A4A4A", "#5A5A5A", "#6B6B6B", "#7D7D7D", "#909090" };
+    static readonly string[] AvatarTones = { "#F3EDFF", "#E8DDFD", "#DCCFFB", "#CFC0F8", "#C2B1F4", "#B5A2F0", "#A893EC" };
     static readonly string SessionFile = Path.Combine(
         Environment.GetFolderPath(Environment.SpecialFolder.ApplicationData), "SandyGram", "session.json");
 
@@ -26,6 +28,7 @@ public partial class MainWindow : Window
     readonly Dictionary<string, JsonNode> chats = new();          // chatId -> fields
     readonly Dictionary<string, JsonNode> userCache = new();      // uid -> fields
     readonly Dictionary<string, DateTime> userCacheAt = new();
+    readonly Dictionary<string, long> lastSoundUnread = new();     // chatId -> последний звуковой unread
     string currentChatId = "";
     string lastMsgSignature = "";
     string lastListSignature = "";
@@ -38,7 +41,7 @@ public partial class MainWindow : Window
     string currentTopicId = "";            // "" = обычный чат; для форумов id открытого топика
     (string Id, string Sender, string Text)? replyTo = null;
     string replyTargetUid = "";            // uid автора, на чьё сообщение отвечают (для /mute и т.п.)
-    static readonly System.Text.RegularExpressions.Regex ModCmdRe = new(@"^/(mute|warn|ban|unmute|unban)\b", System.Text.RegularExpressions.RegexOptions.IgnoreCase);
+    static readonly System.Text.RegularExpressions.Regex ModCmdRe = new(@"^/(mute|warn|ban|unmute|unban|info|theme|help|saved)\b", System.Text.RegularExpressions.RegexOptions.IgnoreCase);
     const long PermanentUntil = 4102444800000L; // ~2100 год: «навсегда»
     NAudio.Wave.WaveInEvent? recorder;
     NAudio.Wave.WaveFileWriter? recWriter;
@@ -48,6 +51,8 @@ public partial class MainWindow : Window
     static readonly string[] StickerCodes = { "1F600","1F602","1F60D","1F60E","1F914","1F644","1F62D","1F621","1F973","1F97A","1F480","1F4A9","1F525","2764","1F44D","1F44E","1F44C","1F64F","1F4AA","1F440","1F389","1F680","26A1","1F31A","1F31D","1F63B","1F63C","1F998","1F984","1F37F" };
     DispatcherTimer? chatsTimer, msgsTimer, presenceTimer;
     System.Threading.CancellationTokenSource? sseCts;
+    System.Threading.CancellationTokenSource? qrCts;
+    string qrToken = "";
     const string Rtdb = "https://sandygram-a3b42-default-rtdb.europe-west1.firebasedatabase.app";
 
     [System.Runtime.InteropServices.DllImport("dwmapi.dll")]
@@ -131,6 +136,70 @@ public partial class MainWindow : Window
         catch (Exception ex) { AuthError.Text = ex.Message; }
         finally { LoginBtn.IsEnabled = RegisterBtn.IsEnabled = true; }
     }
+
+    // ============ вход по QR (телефон сканирует, передаёт refresh-токен) ============
+void QrBtn_Click(object sender, RoutedEventArgs e)
+    {
+        if (QrPanel.Visibility == Visibility.Visible) { StopQr(); return; }
+        QrStatus.Text = ""; QrPanel.Visibility = Visibility.Visible; QrBtn.IsEnabled = false;
+        LoginBtn.IsEnabled = RegisterBtn.IsEnabled = false;
+        qrCts?.Cancel(); qrCts = new System.Threading.CancellationTokenSource();
+        qrToken = Fire.RandomId(11);
+        var payload = $"{Site}/qr/{qrToken}";
+        _ = Fire.PutRtdbJsonAsync($"qrlogin/{qrToken}", new { status = "pending", created = DateTimeOffset.UtcNow.ToUnixTimeMilliseconds() }).ConfigureAwait(false);
+        RenderQr(payload);
+        _ = WatchQrAsync();
+    }
+
+    void RenderQr(string payload)
+    {
+        var qr = new QRCoder.QRCodeGenerator().CreateQrCode(payload, QRCoder.QRCodeGenerator.ECCLevel.M);
+        var png = new QRCoder.PngByteQRCode(qr).GetGraphic(4);
+        using var ms = new MemoryStream(png);
+        var bmp = new BitmapImage();
+        bmp.BeginInit(); bmp.StreamSource = ms; bmp.CacheOption = BitmapCacheOption.OnLoad; bmp.EndInit();
+        bmp.Freeze();
+        QrImage.Source = bmp;
+    }
+
+    async Task WatchQrAsync()
+    {
+        try
+        {
+            var deadline = DateTime.UtcNow.AddMinutes(2);
+            while (!qrCts!.IsCancellationRequested)
+            {
+                try
+                {
+                    var node = await Fire.GetRtdbJsonAsync($"qrlogin/{qrToken}");
+                    var refresh = node?["refresh"]?.GetValue<string>();
+                    if (!string.IsNullOrEmpty(refresh))
+                    {
+                        await Fire.SignInWithRefreshTokenAsync(refresh);
+                        await Fire.DeleteRtdbAsync($"qrlogin/{qrToken}");
+                        SaveSession();
+                        await AfterLoginAsync();
+                        Dispatcher.Invoke(StopQr);
+                        return;
+                    }
+                }
+                catch (FireException fe) { Dispatcher.Invoke(() => { QrStatus.Text = fe.Ru; QrBtn.IsEnabled = true; }); return; }
+                catch { }
+                if (DateTime.UtcNow > deadline) { Dispatcher.Invoke(() => { QrStatus.Text = "Срок истёк — нажмите ещё раз."; QrBtn.IsEnabled = true; }); return; }
+                await Task.Delay(700, qrCts.Token).ConfigureAwait(false);
+            }
+        }
+        catch (TaskCanceledException) { }
+        catch { }
+    }
+
+    void StopQr()
+    {
+        qrCts?.Cancel();
+        QrPanel.Visibility = Visibility.Collapsed;
+        QrBtn.IsEnabled = LoginBtn.IsEnabled = RegisterBtn.IsEnabled = true;
+    }
+    void QrCancelBtn_Click(object sender, RoutedEventArgs e) => StopQr();
 
     async Task EnsureProfileAsync(string name)
     {
@@ -502,24 +571,32 @@ public partial class MainWindow : Window
     {
         try
         {
-            // звук, если событие не в открытом чате или окно не в фокусе
-            if (chatId != currentChatId || !IsActive)
+            var doc = await Fire.GetDocAsync($"chats/{chatId}");
+            if (doc?["fields"] == null) return;
+            var fields = doc["fields"]!;
+
+            // звук ТОЛЬКО если появилось новое непрочитанное сообщение
+            // (и оно не в открытом/активном окне чата)
+            long myUnread = 0;
+            foreach (var kv in Fire.FMap(fields, "unread"))
+                if (kv.Key == Fire.Uid && kv.Value is long u) myUnread = u;
+            var bg = chatId != currentChatId || !IsActive;
+            var isNew = myUnread > 0 && (!lastSoundUnread.TryGetValue(chatId, out var prev) || myUnread > prev);
+            lastSoundUnread[chatId] = myUnread;
+            if (bg && isNew)
                 try { System.Media.SystemSounds.Asterisk.Play(); } catch { }
+
             if (chatId == currentChatId) await PollMessagesAsync(); // дельта: только новые
             // обновляем одну строку списка (1 чтение), а не весь список
-            var doc = await Fire.GetDocAsync($"chats/{chatId}");
-            if (doc?["fields"] != null)
+            chats[chatId] = fields;
+            lastListSignature = "";
+            await RenderChatListAsync();
+            if (chatId == currentChatId && loadedMsgs.Count > 0)
             {
-                chats[chatId] = doc["fields"]!;
-                lastListSignature = "";
-                await RenderChatListAsync();
-                if (chatId == currentChatId && loadedMsgs.Count > 0)
-                {
-                    long lro = 0;
-                    foreach (var kv in Fire.FMap(doc["fields"]!, "lastRead"))
-                        if (kv.Key != Fire.Uid && kv.Value is long lr && lr > lro) lro = lr;
-                    if (lro != lastTicksMark) RenderMessages(); // галочки «прочитано»
-                }
+                long lro = 0;
+                foreach (var kv in Fire.FMap(fields, "lastRead"))
+                    if (kv.Key != Fire.Uid && kv.Value is long lr && lr > lro) lro = lr;
+                if (lro != lastTicksMark) RenderMessages(); // галочки «прочитано»
             }
         }
         catch { }
@@ -669,7 +746,7 @@ public partial class MainWindow : Window
         b.Child = new TextBlock
         {
             Text = letter, FontWeight = FontWeights.Bold, FontSize = size * 0.42,
-            Foreground = tone == "#F5F5F5" ? (Brush)FindResource("OnInverse") : Brushes.White,
+            Foreground = tone is "#F5F5F5" or "#F3EDFF" or "#E8DDFD" or "#DCCFFB" or "#CFC0F8" or "#C2B1F4" or "#B5A2F0" or "#A893EC" ? (Brush)FindResource("OnInverse") : Brushes.White,
             HorizontalAlignment = HorizontalAlignment.Center, VerticalAlignment = VerticalAlignment.Center,
         };
         return b;
@@ -697,6 +774,62 @@ public partial class MainWindow : Window
 
     // ================================================================ переписка
     bool IsForumChat(JsonNode f) => Fire.FList(f, "topics").Count > 0;
+
+    TextBlock MakeMessageText(string text, Brush fg, bool mine)
+    {
+        var tb = new TextBlock { FontSize = 13.5, Foreground = fg, TextWrapping = TextWrapping.Wrap };
+        var linkBrush = mine ? (Brush)FindResource("OnInverse") : (Brush)FindResource("Inverse");
+        var cursor = 0;
+        var rx = new System.Text.RegularExpressions.Regex(@"https?://[^\s<]+");
+        foreach (System.Text.RegularExpressions.Match mm in rx.Matches(text))
+        {
+            if (mm.Index > cursor) tb.Inlines.Add(new Run(text[cursor..mm.Index]));
+            var u = System.Text.RegularExpressions.Regex.Replace(mm.Value, "[.,;:!?)]+$", "");
+            var invite = System.Text.RegularExpressions.Regex.Match(u, @"^https?://(?:sandygram-a3b42\.web\.app|localhost(?::\d+)?)/join/([a-f0-9]{6,})$", System.Text.RegularExpressions.RegexOptions.IgnoreCase);
+            var h = new Hyperlink { Foreground = linkBrush, TextDecorations = TextDecorations.Underline };
+            if (invite.Success)
+            {
+                var code = invite.Groups[1].Value;
+                h.Inlines.Add(new Run("🤝 Вступить по ссылке"));
+                h.Click += async (_, _) => await JoinInviteAsync(code);
+            }
+            else
+            {
+                h.Inlines.Add(new Run(u));
+                h.NavigateUri = new Uri(u);
+                h.RequestNavigate += (_, e) => Process.Start(new System.Diagnostics.ProcessStartInfo(e.Uri.AbsoluteUri) { UseShellExecute = true });
+            }
+            tb.Inlines.Add(h);
+            cursor = mm.Index + mm.Length;
+        }
+        if (cursor < text.Length) tb.Inlines.Add(new Run(text[cursor..]));
+        return tb;
+    }
+
+    async Task JoinInviteAsync(string code)
+    {
+        try
+        {
+            var doc = await Fire.GetDocAsync($"invites/{code}");
+            if (doc?["fields"] == null) { MessageBox.Show("Ссылка недействительна или отозвана.", "SandyGram", MessageBoxButton.OK, MessageBoxImage.Information); return; }
+            var fields = doc["fields"]!;
+            var chatId = Fire.FStr(fields, "chatId");
+            if (string.IsNullOrEmpty(chatId)) return;
+            var title = Fire.FStr(fields, "title");
+            var already = Fire.FList(fields, "members").Contains(Fire.Uid);
+            var res = MessageBox.Show($"Войти в чат «{title}»?", "SandyGram", MessageBoxButton.OKCancel, MessageBoxImage.Question);
+            if (res != MessageBoxResult.OK) return;
+            if (!already)
+            {
+                var chatDoc = await Fire.GetDocAsync($"chats/{chatId}");
+                var cur = Fire.FList(chatDoc?["fields"] ?? new JsonObject(), "members").Select(x => x as string ?? "").ToList();
+                if (!cur.Contains(Fire.Uid)) cur.Add(Fire.Uid);
+                await Fire.PatchDocAsync($"chats/{chatId}", new Dictionary<string, object?> { ["members"] = cur }, new[] { "members" });
+            }
+            await OpenChatAsync(chatId);
+        }
+        catch (Exception) { MessageBox.Show("Не удалось войти по ссылке.", "SandyGram", MessageBoxButton.OK, MessageBoxImage.Error); }
+    }
 
     async Task OpenChatAsync(string chatId)
     {
@@ -995,7 +1128,7 @@ public partial class MainWindow : Window
         }
 
         if (Fire.FStr(m, "text") is { Length: > 0 } text)
-            stack.Children.Add(new TextBlock { Text = text, FontSize = 13.5, Foreground = fg, TextWrapping = TextWrapping.Wrap });
+            stack.Children.Add(MakeMessageText(text, fg, mine));
 
         var created = Fire.FLong(m, "createdAt");
         var meta = DateTimeOffset.FromUnixTimeMilliseconds(created).ToLocalTime().ToString("HH:mm");
@@ -1210,6 +1343,30 @@ public partial class MainWindow : Window
     }
     static string FmtModUntil(long ts) => ts >= PermanentUntil ? "навсегда" : DateTimeOffset.FromUnixTimeMilliseconds(ts).ToLocalTime().ToString("dd.MM HH:mm");
     static Dictionary<string, object?> AsObj(Dictionary<string, object?> d) => d;
+
+    async Task HandleSlashAsync(string raw)
+    {
+        var p = raw.Trim().Split(new[] { ' ', '\t' }, StringSplitOptions.RemoveEmptyEntries);
+        var cmd = p.Length > 0 ? p[0].TrimStart('/').ToLowerInvariant() : "";
+        if (cmd is "mute" or "warn" or "ban" or "unmute" or "unban") { await RunModAsync(raw); return; }
+        if (cmd == "info")
+        {
+            var live = currentChatId != null && chats.TryGetValue(currentChatId, out var f0) ? f0 : null;
+            if (live == null) return;
+            var count = Fire.FList(live, "members").Count;
+            MessageBox.Show($"«{Fire.FStr(live, "title")}»\nТип: {Fire.FStr(live, "type")}\nУчастников: {count}", "SandyGram", MessageBoxButton.OK, MessageBoxImage.Information);
+            return;
+        }
+        if (cmd == "theme") { MessageBox.Show("Тема в ПК-версии задаётся автоматически.", "SandyGram", MessageBoxButton.OK, MessageBoxImage.Information); return; }
+        if (cmd == "saved")
+        {
+            var sv = chats.FirstOrDefault(kv => Fire.FStr(kv.Value, "type") == "saved").Key;
+            if (sv != null) await OpenChatAsync(sv);
+            else MessageBox.Show("Нет «Избранного».", "SandyGram", MessageBoxButton.OK, MessageBoxImage.Information);
+            return;
+        }
+        if (cmd == "help") { MessageBox.Show("/info\n/theme\n/saved\n/help\n(модерация: /mute /warn /ban /unmute /unban)", "SandyGram", MessageBoxButton.OK, MessageBoxImage.Information); return; }
+    }
 
     async Task RunModAsync(string raw)
     {
@@ -1561,7 +1718,7 @@ public partial class MainWindow : Window
         var text = MsgInput.Text.Trim();
         if (text.Length == 0) return;
         if (!chats.TryGetValue(currentChatId, out var f)) return;
-        if (ModCmdRe.IsMatch(text)) { MsgInput.Text = ""; drafts.Remove(currentChatId); await RunModAsync(text); MsgInput.Focus(); return; }
+        if (ModCmdRe.IsMatch(text)) { MsgInput.Text = ""; drafts.Remove(currentChatId); await HandleSlashAsync(text); MsgInput.Focus(); return; }
         if (sending) return;
         sending = true;
         MsgInput.Text = ""; // мгновенно, защита от спама

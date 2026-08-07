@@ -177,6 +177,43 @@ async function tick(env) {
   return { chats: chats.length, sent, cleaned };
 }
 
+// ---------- QR-вход: refresh-токен → Firebase Custom Token ----------
+// Телефон по QR-коду кладёт свой refresh-токен в RTDB qrlogin/<node> (см. app/App.js),
+// веб забирает его и просит здесь выдать custom token для signInWithCustomToken.
+const WEB_API_KEY = "AIzaSyAjGwFBdfll--_ohWWlaZmV3JT2ksRD7vk"; // публичный ключ из firebase-config.js веба
+
+async function uidByRefreshToken(refreshToken) {
+  const r = await fetch(`https://securetoken.googleapis.com/v1/token?key=${WEB_API_KEY}`, {
+    method: "POST",
+    headers: { "Content-Type": "application/x-www-form-urlencoded" },
+    body: new URLSearchParams({ grant_type: "refresh_token", refresh_token: refreshToken }),
+  });
+  if (!r.ok) throw new Error(`securetoken HTTP ${r.status}`);
+  const data = await r.json();
+  let payload = data.id_token.split(".")[1].replace(/-/g, "+").replace(/_/g, "/");
+  payload += "=".repeat((4 - (payload.length % 4)) % 4);
+  return JSON.parse(atob(payload)).user_id;
+}
+
+async function customToken(env, uid) {
+  const sa = JSON.parse(env.SERVICE_ACCOUNT);
+  const enc = new TextEncoder();
+  const b64url = (buf) => btoa(String.fromCharCode(...new Uint8Array(buf))).replace(/\+/g, "-").replace(/\//g, "_").replace(/=+$/, "");
+  const b64urlJson = (obj) => b64url(enc.encode(JSON.stringify(obj)));
+  const now = Math.floor(Date.now() / 1000);
+  const unsigned = `${b64urlJson({ alg: "RS256", typ: "JWT" })}.${b64urlJson({
+    iss: sa.client_email,
+    sub: sa.client_email,
+    aud: "https://identitytoolkit.googleapis.com/google.identity.identitytoolkit.v1.IdentityToolkit",
+    iat: now, exp: now + 3600, uid,
+  })}`;
+  const pem = sa.private_key.replace(/-----[A-Z ]+-----/g, "").replace(/\s/g, "");
+  const der = Uint8Array.from(atob(pem), (c) => c.charCodeAt(0));
+  const key = await crypto.subtle.importKey("pkcs8", der, { name: "RSASSA-PKCS1-v1_5", hash: "SHA-256" }, false, ["sign"]);
+  const sig = await crypto.subtle.sign("RSASSA-PKCS1-v1_5", key, enc.encode(unsigned));
+  return `${unsigned}.${b64url(sig)}`;
+}
+
 export default {
   async scheduled(event, env, ctx) {
     ctx.waitUntil(tick(env).then(r => console.log("tick:", JSON.stringify(r))).catch(e => console.error("tick error:", String(e))));
@@ -187,6 +224,19 @@ export default {
     if (url.pathname === "/run" && url.searchParams.get("key") === env.PING_KEY) {
       try { return Response.json(await tick(env)); }
       catch (e) { return Response.json({ error: String(e) }, { status: 500 }); }
+    }
+    // QR-вход: POST {"refreshToken": "..."} -> {"token": "<Firebase Custom Token>"}
+    if (request.method === "POST" && url.pathname === "/qr/exchange") {
+      try {
+        const body = await request.json();
+        const refreshToken = String(body?.refreshToken || "").trim();
+        if (!refreshToken) return Response.json({ error: "refreshToken required" }, { status: 400 });
+        const uid = await uidByRefreshToken(refreshToken);
+        const token = await customToken(env, uid);
+        return Response.json({ token });
+      } catch (e) {
+        return Response.json({ error: String(e) }, { status: 500 });
+      }
     }
     return new Response("SandyGram push worker", { status: 200 });
   },

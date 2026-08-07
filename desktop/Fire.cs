@@ -51,6 +51,38 @@ public static class Fire
         tokenExpires = DateTime.UtcNow.AddSeconds(double.Parse(j["expiresIn"]!.GetValue<string>()) - 120);
     }
 
+    // вход по refresh-токену (из QR-обмена с телефоном)
+    public static async Task SignInWithRefreshTokenAsync(string refresh)
+    {
+        var r = await http.PostAsync($"https://securetoken.googleapis.com/v1/token?key={ApiKey}",
+            new FormUrlEncodedContent(new Dictionary<string, string> { ["grant_type"] = "refresh_token", ["refresh_token"] = refresh }));
+        var j = JsonNode.Parse(await r.Content.ReadAsStringAsync())!;
+        if (j["error"] != null) throw new FireException(j["error"]!["message"]?.GetValue<string>() ?? "QR_AUTH_FAILED");
+        IdToken = j["id_token"]!.GetValue<string>();
+        RefreshToken = j["refresh_token"]!.GetValue<string>();
+        Uid = j["user_id"]!.GetValue<string>();
+        tokenExpires = DateTime.UtcNow.AddSeconds(double.Parse(j["expires_in"]!.GetValue<string>()) - 120);
+    }
+
+    // RTDB: чтение и запись qrlogin-узла (правила позволяют неавторизованно)
+    public static async Task<JsonNode?> GetRtdbJsonAsync(string path)
+    {
+        var r = await http.GetAsync($"https://sandygram-a3b42-default-rtdb.europe-west1.firebasedatabase.app/{path}.json");
+        if (!r.IsSuccessStatusCode) return null;
+        var text = await r.Content.ReadAsStringAsync();
+        return text.Trim() == "null" ? null : JsonNode.Parse(text);
+    }
+
+    public static async Task PutRtdbJsonAsync(string path, object body)
+    {
+        await http.PutAsync($"https://sandygram-a3b42-default-rtdb.europe-west1.firebasedatabase.app/{path}.json", JsonContent.Create(body));
+    }
+
+    public static async Task DeleteRtdbAsync(string path)
+    {
+        await http.PutAsync($"https://sandygram-a3b42-default-rtdb.europe-west1.firebasedatabase.app/{path}.json", new StringContent("null", System.Text.Encoding.UTF8, "application/json"));
+    }
+
     public static async Task EnsureTokenAsync()
     {
         if (string.IsNullOrEmpty(RefreshToken) || DateTime.UtcNow < tokenExpires) return;

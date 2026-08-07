@@ -50,7 +50,8 @@ input, textarea { font: inherit; color: inherit; background: none; border: 0; ou
 .hidden { display: none !important; }
 .muted { color: var(--text-muted); }
 
-/* ---------- Avatars: 7 monochrome tones ---------- */
+/* ---------- Avatars: 7 пастельно-фиолетовых тонов (Material) ---------- */
+:root { --avatar-fg: #241a4a; }
 .avatar {
   width: 44px; height: 44px; border-radius: 50%; flex: none;
   display: grid; place-items: center; font-weight: 600; font-size: 18px;
@@ -58,13 +59,13 @@ input, textarea { font: inherit; color: inherit; background: none; border: 0; ou
 }
 .avatar.large { width: 96px; height: 96px; font-size: 38px; }
 .avatar[data-color="-1"] { background: var(--inverse); color: var(--on-inverse); }
-.avatar[data-color="0"] { background: #2e2e2e; color: #fff; }
-.avatar[data-color="1"] { background: #494949; color: #fff; }
-.avatar[data-color="2"] { background: #616161; color: #fff; }
-.avatar[data-color="3"] { background: #7d7d7d; color: #111; }
-.avatar[data-color="4"] { background: #9c9c9c; color: #111; }
-.avatar[data-color="5"] { background: #c2c2c2; color: #111; }
-.avatar[data-color="6"] { background: #e6e6e6; color: #111; }
+.avatar[data-color="0"] { background: #f3edff; color: var(--avatar-fg); }
+.avatar[data-color="1"] { background: #e8ddfd; color: var(--avatar-fg); }
+.avatar[data-color="2"] { background: #dccffb; color: var(--avatar-fg); }
+.avatar[data-color="3"] { background: #cfc0f8; color: var(--avatar-fg); }
+.avatar[data-color="4"] { background: #c2b1f4; color: var(--avatar-fg); }
+.avatar[data-color="5"] { background: #b5a2f0; color: var(--avatar-fg); }
+.avatar[data-color="6"] { background: #a893ec; color: var(--avatar-fg); }
 
 /* ---------- Auth ---------- */
 .auth-shell { height: 100dvh; display: grid; place-items: center; padding: 20px; }
@@ -340,6 +341,12 @@ input, textarea { font: inherit; color: inherit; background: none; border: 0; ou
 .user-row .info { flex: 1; min-width: 0; }
 .user-row .info strong { display: block; font-size: 14.5px; }
 .user-row .info small { color: var(--text-muted); font-size: 12.5px; }
+.mod-action {
+  flex: none; padding: 7px 13px; border-radius: 999px; margin-left: auto;
+  background: var(--surface-2); color: var(--text); font-size: 12.5px; font-weight: 600;
+  transition: background .15s, color .15s;
+}
+.mod-action:hover { background: var(--inverse); color: var(--on-inverse); }
 
 /* ---------- Search results ---------- */
 .search-section-title { font-size: 12px; color: var(--text-muted); text-transform: uppercase; letter-spacing: .06em; padding: 12px 14px 6px; }
@@ -420,6 +427,15 @@ input, textarea { font: inherit; color: inherit; background: none; border: 0; ou
   cursor: pointer;
 }
 .mention:hover { opacity: .75; }
+
+.msg-text a { color: var(--inverse); text-decoration: underline; text-underline-offset: 2px; word-break: break-word; }
+.invite-msg {
+  display: inline-flex; align-items: center; gap: 6px;
+  background: var(--surface-2); color: var(--text); border: 1px solid var(--inverse);
+  padding: 6px 12px; border-radius: 999px; font: inherit; font-weight: 600; font-size: 13.5px;
+  cursor: pointer; vertical-align: middle; transition: background .15s, color .15s;
+}
+.invite-msg:hover { background: var(--inverse); color: var(--on-inverse); }
 
 /* @-пикер упоминаний */
 .mention-panel {
@@ -612,3 +628,20 @@ input, textarea { font: inherit; color: inherit; background: none; border: 0; ou
 .incoming-actions { display: flex; gap: 40px; margin-top: 22px; }
 @keyframes ring-pulse { 0%,100% { transform: scale(1); } 50% { transform: scale(1.08); } }
 .incoming-card .avatar { animation: ring-pulse 1.2s infinite; }
+
+/* ---------- Полировка ---------- */
+::-webkit-scrollbar { width: 9px; height: 9px; }
+::-webkit-scrollbar-thumb { background: var(--surface-3); border-radius: 999px; border: 2px solid transparent; background-clip: content-box; }
+::-webkit-scrollbar-thumb:hover { background-color: var(--text-muted); }
+::-webkit-scrollbar-track, ::-webkit-scrollbar-corner { background: transparent; }
+.composer textarea:focus, .field input:focus, .modal .field input:focus, .modal .field textarea:focus { box-shadow: 0 0 0 2px var(--inverse); }
+.composer textarea { transition: box-shadow .2s, background .2s; }
+.send-button { box-shadow: 0 6px 16px -6px var(--inverse); }
+.primary-button:hover, .modal-actions .confirm:hover, .segment.active:hover { filter: brightness(1.07); }
+.chat-item { transition: background .15s; }
+.bubble { transition: box-shadow .2s; }
+.chat-item.active .chat-avatar, .avatar:has(img) { transition: transform .15s; }
+.chat-item:hover .chat-avatar { transform: scale(1.04); }
+.message { animation: msg-in .18s ease; }
+@keyframes msg-in { from { opacity: 0; transform: translateY(6px); } to { opacity: 1; transform: none; } }
+.meta, .notice .meta { letter-spacing: .01em; }

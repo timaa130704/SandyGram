@@ -187,6 +187,17 @@
               <TextBlock Text="Войти через браузер" Foreground="{StaticResource Text}" FontWeight="SemiBold" FontSize="13.5"/>
             </StackPanel>
           </Button>
+          <Button x:Name="QrBtn" Style="{StaticResource GhostBtn}" Height="44" Margin="0,10,0,0" Click="QrBtn_Click">
+            <TextBlock Text="📷 Войти по QR" Foreground="{StaticResource Text}" FontWeight="SemiBold" FontSize="13.5"/>
+          </Button>
+          <StackPanel x:Name="QrPanel" Visibility="Collapsed" Margin="0,14,0,0">
+            <Border Background="White" CornerRadius="14" Padding="10" HorizontalAlignment="Center">
+              <Image x:Name="QrImage" Width="200" Height="200" Stretch="Uniform" RenderOptions.BitmapScalingMode="HighQuality"/>
+            </Border>
+            <TextBlock Text="Откройте SandyGram на телефоне → Настройки → «Отсканировать QR»" Foreground="{StaticResource Muted}" FontSize="12" TextWrapping="Wrap" TextAlignment="Center" Margin="0,10,0,0"/>
+            <TextBlock x:Name="QrStatus" Foreground="#FF6B6B" FontSize="12" TextWrapping="Wrap" TextAlignment="Center" Margin="0,6,0,0"/>
+            <Button x:Name="QrCancelBtn" Style="{StaticResource GhostBtn}" Content="Отмена" Height="38" Margin="0,12,0,0" Click="QrCancelBtn_Click"/>
+          </StackPanel>
         </StackPanel>
       </Border>
     </Grid>
