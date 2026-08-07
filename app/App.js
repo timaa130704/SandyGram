@@ -1365,7 +1365,7 @@ function ChatInfoSheet({ ctx, chat, onClose }) {
 
 // ================================================================ ЧАТ
 function ChatScreen({ ctx, chatId }) {
-  const { T, me, chats, viewOf, setScreen, openDmByName, fetchUser } = ctx;
+  const { T, me, chats, viewOf, setScreen, openDmByName, fetchUser, joinByCode } = ctx;
   const chat = chats.get(chatId);
   const [messages, setMessages] = useState([]);
   const [text, setText] = useState("");
@@ -1916,6 +1916,7 @@ function ChatScreen({ ctx, chatId }) {
                 onDoubleTap={() => toggleReaction(item.m, "❤️")}
                 onSwipeReply={() => { setEditTarget(null); setReplyTo(item.m); }}
                 onMention={openDmByName}
+                onInvite={joinByCode}
                 onVote={(m, o) => votePoll(m, o)}
                 onQuotePress={() => item.m.replyTo && scrollToMessage(item.m.replyTo.id)} />
             )}
@@ -2099,7 +2100,7 @@ function ChatScreen({ ctx, chatId }) {
 }
 
 // ---------- пузырь сообщения (свайп вправо = ответить) ----------
-function MessageBubble({ T, m, mine, group, lastReadByOthers, saved, onLongPress, onPhoto, onDoubleTap, onSwipeReply, onMention, onQuotePress, onVote }) {
+function MessageBubble({ T, m, mine, group, lastReadByOthers, saved, onLongPress, onPhoto, onDoubleTap, onSwipeReply, onMention, onInvite, onQuotePress, onVote }) {
   const lastTap = useRef(0);
   const read = mine && lastReadByOthers >= m.createdAt;
   const pan = useRef(new Animated.Value(0)).current;
@@ -2174,7 +2175,7 @@ function MessageBubble({ T, m, mine, group, lastReadByOthers, saved, onLongPress
           )}
           {m.voice && <VoiceBubble T={T} m={m} mine={mine} />}
           {!!m.text && (
-            <MentionText text={m.text} onMention={onMention} onInvite={joinByCode}
+            <MentionText text={m.text} onMention={onMention} onInvite={onInvite}
               style={{ color: mine ? T.onInverse : T.text, fontSize: 15.5 }}
               mentionStyle={{ fontWeight: "700", textDecorationLine: "underline" }}
               linkStyle={{ color: mine ? T.onInverse : T.inverse, textDecorationLine: "underline", fontWeight: "600" }} />
