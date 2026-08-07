@@ -232,7 +232,12 @@
               <TextBlock x:Name="MyName" FontWeight="Bold" FontSize="14.5" Foreground="{StaticResource Text}" TextTrimming="CharacterEllipsis"/>
               <TextBlock x:Name="MyHandle" FontSize="11.5" Foreground="{StaticResource Muted}"/>
             </StackPanel>
-            <Button x:Name="LogoutBtn" Grid.Column="2" Style="{StaticResource IconBtn}" Content="⏻" ToolTip="Выйти" Click="LogoutBtn_Click"/>
+            <StackPanel Grid.Column="2" Orientation="Horizontal">
+              <Button x:Name="NewChatBtn" Style="{StaticResource IconBtn}" ToolTip="Новый чат" Click="NewChatBtn_Click">
+                <TextBlock Text="✎" FontSize="15"/>
+              </Button>
+              <Button x:Name="LogoutBtn" Style="{StaticResource IconBtn}" Content="⏻" ToolTip="Выйти" Click="LogoutBtn_Click"/>
+            </StackPanel>
           </Grid>
           <!-- поиск -->
           <TextBox x:Name="SearchBox" Grid.Row="1" Style="{StaticResource Input}" Height="38" FontSize="13"
@@ -256,10 +261,12 @@
           <Grid>
             <Grid.ColumnDefinitions>
               <ColumnDefinition Width="Auto"/>
+              <ColumnDefinition Width="Auto"/>
               <ColumnDefinition Width="*"/>
             </Grid.ColumnDefinitions>
-            <ContentControl x:Name="ChatAvatar"/>
-            <StackPanel Grid.Column="1" VerticalAlignment="Center" Margin="12,0,0,0">
+            <Button x:Name="TopicBackBtn" Style="{StaticResource IconBtn}" Content="‹" FontSize="20" Margin="0,0,6,0" Visibility="Collapsed" Click="TopicBackBtn_Click"/>
+            <ContentControl x:Name="ChatAvatar" Grid.Column="1"/>
+            <StackPanel Grid.Column="2" VerticalAlignment="Center" Margin="12,0,0,0">
               <TextBlock x:Name="ChatTitle" FontWeight="Bold" FontSize="15.5" Foreground="{StaticResource Text}"/>
               <TextBlock x:Name="ChatSubtitle" Foreground="{StaticResource Muted}" FontSize="11.5"/>
             </StackPanel>
@@ -279,14 +286,33 @@
 
         <!-- остров: композер -->
         <Border x:Name="Composer" Grid.Row="2" Background="{StaticResource Surface}" CornerRadius="22" Padding="10" Visibility="Collapsed" Margin="0,10,0,0">
+          <StackPanel>
+            <Border x:Name="ReplyBar" Background="{StaticResource Surface2}" CornerRadius="12" Padding="10,6" Margin="0,0,0,8" Visibility="Collapsed">
+              <Grid>
+                <Grid.ColumnDefinitions>
+                  <ColumnDefinition Width="*"/><ColumnDefinition Width="Auto"/>
+                </Grid.ColumnDefinitions>
+                <StackPanel>
+                  <TextBlock x:Name="ReplyTitle" FontWeight="Bold" FontSize="12" Foreground="{StaticResource Text}"/>
+                  <TextBlock x:Name="ReplyText" FontSize="12" Foreground="{StaticResource Muted}" TextTrimming="CharacterEllipsis"/>
+                </StackPanel>
+                <Button Grid.Column="1" Style="{StaticResource IconBtn}" Width="26" Height="26" Content="✕" FontSize="12" Click="CancelReply_Click"/>
+              </Grid>
+            </Border>
           <Grid>
             <Grid.ColumnDefinitions>
+              <ColumnDefinition Width="Auto"/>
+              <ColumnDefinition Width="Auto"/>
               <ColumnDefinition Width="*"/>
               <ColumnDefinition Width="Auto"/>
+              <ColumnDefinition Width="Auto"/>
             </Grid.ColumnDefinitions>
-            <TextBox x:Name="MsgInput" Grid.Column="0" Style="{StaticResource Input}" FontSize="14" Height="44"
+            <Button x:Name="StickerBtn" Grid.Column="0" Style="{StaticResource IconBtn}" Content="☺" FontSize="18" ToolTip="Стикеры" Click="StickerBtn_Click" Margin="0,0,4,0"/>
+            <Button x:Name="AttachBtn" Grid.Column="1" Style="{StaticResource IconBtn}" Content="🖼" FontSize="15" ToolTip="Фото" Click="AttachBtn_Click" Margin="0,0,6,0"/>
+            <TextBox x:Name="MsgInput" Grid.Column="2" Style="{StaticResource Input}" FontSize="14" Height="44"
                      AcceptsReturn="False" KeyDown="MsgInput_KeyDown" Tag="Сообщение"/>
-            <Button x:Name="SendBtn" Grid.Column="1" Width="44" Height="44" Margin="10,0,0,0"
+            <Button x:Name="MicBtn" Grid.Column="3" Style="{StaticResource IconBtn}" Content="🎙" FontSize="15" ToolTip="Голосовое" Click="MicBtn_Click" Margin="6,0,0,0"/>
+            <Button x:Name="SendBtn" Grid.Column="4" Width="44" Height="44" Margin="8,0,0,0"
                     Cursor="Hand" BorderThickness="0" Click="SendBtn_Click">
               <Button.Template>
                 <ControlTemplate TargetType="Button">
@@ -300,8 +326,49 @@
               </Button.Template>
             </Button>
           </Grid>
+          </StackPanel>
         </Border>
       </Grid>
+    </Grid>
+
+    <!-- ===== Панель нового чата ===== -->
+    <Grid x:Name="NewChatPanel" Background="#0A0A0AEE" Visibility="Collapsed">
+      <Border Background="{StaticResource Surface}" CornerRadius="24" Padding="24" Width="420" MaxHeight="560" VerticalAlignment="Center">
+        <StackPanel>
+          <Grid Margin="0,0,0,12">
+            <TextBlock Text="Новый чат" FontSize="18" FontWeight="Bold" Foreground="{StaticResource Text}"/>
+            <Button Style="{StaticResource IconBtn}" Content="✕" HorizontalAlignment="Right" Click="CloseNewChat_Click"/>
+          </Grid>
+          <TextBox x:Name="UserSearch" Style="{StaticResource Input}" Height="42" Margin="0,0,0,10" Tag="@имя" TextChanged="UserSearch_Changed"/>
+          <ScrollViewer MaxHeight="240" VerticalScrollBarVisibility="Auto">
+            <StackPanel x:Name="UserResults"/>
+          </ScrollViewer>
+          <Rectangle Height="1" Fill="{StaticResource Outline}" Margin="0,12"/>
+          <TextBox x:Name="NewGroupTitle" Style="{StaticResource Input}" Height="42" Margin="0,0,0,8" Tag="Название группы или канала"/>
+          <Grid>
+            <Grid.ColumnDefinitions>
+              <ColumnDefinition Width="*"/><ColumnDefinition Width="8"/><ColumnDefinition Width="*"/>
+            </Grid.ColumnDefinitions>
+            <Button Grid.Column="0" Style="{StaticResource GhostBtn}" Content="👥 Группа" Height="40" Click="CreateGroup_Click"/>
+            <Button Grid.Column="2" Style="{StaticResource GhostBtn}" Content="📢 Канал" Height="40" Click="CreateChannel_Click"/>
+          </Grid>
+        </StackPanel>
+      </Border>
+    </Grid>
+
+    <!-- ===== Панель стикеров ===== -->
+    <Grid x:Name="StickerPanel" Background="#0A0A0AEE" Visibility="Collapsed">
+      <Border Background="{StaticResource Surface}" CornerRadius="24" Padding="18" Width="380" VerticalAlignment="Center">
+        <StackPanel>
+          <Grid Margin="0,0,0,10">
+            <TextBlock Text="Стикеры" FontSize="16" FontWeight="Bold" Foreground="{StaticResource Text}"/>
+            <Button Style="{StaticResource IconBtn}" Content="✕" HorizontalAlignment="Right" Click="CloseStickers_Click"/>
+          </Grid>
+          <ScrollViewer MaxHeight="340" VerticalScrollBarVisibility="Auto">
+            <WrapPanel x:Name="StickerGrid"/>
+          </ScrollViewer>
+        </StackPanel>
+      </Border>
     </Grid>
   </Grid>
 </Window>

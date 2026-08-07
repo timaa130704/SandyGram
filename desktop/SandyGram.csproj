@@ -13,4 +13,8 @@
     <Resource Include="Fonts/GoogleSans-Medium.ttf" />
     <Resource Include="Fonts/GoogleSans-Bold.ttf" />
   </ItemGroup>
+
+  <ItemGroup>
+    <PackageReference Include="NAudio" Version="2.3.0" />
+  </ItemGroup>
 </Project>

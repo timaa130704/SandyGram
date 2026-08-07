@@ -35,6 +35,14 @@ public partial class MainWindow : Window
     bool sending = false;
     string searchFilter = "";
     readonly Dictionary<string, string> drafts = new();
+    string currentTopicId = "";            // "" = обычный чат; для форумов id открытого топика
+    (string Id, string Sender, string Text)? replyTo = null;
+    NAudio.Wave.WaveInEvent? recorder;
+    NAudio.Wave.WaveFileWriter? recWriter;
+    string recPath = "";
+    DateTime recStart;
+    static string Bq(string v) => "\u0060" + v + "\u0060"; // обратные кавычки для спец-ключей в путях полей
+    static readonly string[] StickerCodes = { "1F600","1F602","1F60D","1F60E","1F914","1F644","1F62D","1F621","1F973","1F97A","1F480","1F4A9","1F525","2764","1F44D","1F44E","1F44C","1F64F","1F4AA","1F440","1F389","1F680","26A1","1F31A","1F31D","1F63B","1F63C","1F998","1F984","1F37F" };
     DispatcherTimer? chatsTimer, msgsTimer, presenceTimer;
     System.Threading.CancellationTokenSource? sseCts;
     const string Rtdb = "https://sandygram-a3b42-default-rtdb.europe-west1.firebasedatabase.app";
@@ -288,6 +296,123 @@ public partial class MainWindow : Window
         finally { PickBtn.IsEnabled = true; }
     }
 
+    // ---------- новый чат ----------
+    void NewChatBtn_Click(object sender, RoutedEventArgs e) { NewChatPanel.Visibility = Visibility.Visible; UserSearch.Focus(); }
+    void CloseNewChat_Click(object sender, RoutedEventArgs e) => NewChatPanel.Visibility = Visibility.Collapsed;
+
+    System.Threading.CancellationTokenSource? searchCts;
+    async void UserSearch_Changed(object sender, TextChangedEventArgs e)
+    {
+        searchCts?.Cancel();
+        var cts = searchCts = new System.Threading.CancellationTokenSource();
+        var q = UserSearch.Text.Trim().ToLowerInvariant().TrimStart('@');
+        UserResults.Children.Clear();
+        if (q.Length < 1) return;
+        try { await Task.Delay(350, cts.Token); } catch { return; }
+        try
+        {
+            var rows = await Fire.RunQueryAsync(new
+            {
+                from = new[] { new { collectionId = "users" } },
+                where = new
+                {
+                    compositeFilter = new
+                    {
+                        op = "AND",
+                        filters = new object[]
+                        {
+                            new { fieldFilter = new { field = new { fieldPath = "username" }, op = "GREATER_THAN_OR_EQUAL", value = new { stringValue = q } } },
+                            new { fieldFilter = new { field = new { fieldPath = "username" }, op = "LESS_THAN_OR_EQUAL", value = new { stringValue = q + "\uf8ff" } } },
+                        },
+                    },
+                },
+                limit = 15,
+            });
+            if (cts.IsCancellationRequested) return;
+            foreach (var (uid, uf) in rows)
+            {
+                if (uid == Fire.Uid) continue;
+                var name = Fire.FStr(uf, "displayName");
+                var uname = Fire.FStr(uf, "username");
+                var tone = AvatarTones[Math.Abs((int)Fire.FLong(uf, "avatarColor")) % 7];
+                var photo = Fire.FStr(uf, "avatar");
+                var row = new Border { Style = (Style)FindResource("ChatRow"), Padding = new Thickness(8, 7, 8, 7) };
+                var g = new Grid();
+                g.ColumnDefinitions.Add(new ColumnDefinition { Width = GridLength.Auto });
+                g.ColumnDefinitions.Add(new ColumnDefinition { Width = new GridLength(1, GridUnitType.Star) });
+                g.Children.Add(MakeAvatar(name.Length > 0 ? name[..1].ToUpper() : "?", tone, photo.Length > 0 ? photo : null, 38));
+                var sp = new StackPanel { Margin = new Thickness(10, 0, 0, 0), VerticalAlignment = VerticalAlignment.Center };
+                sp.Children.Add(new TextBlock { Text = name, FontWeight = FontWeights.Bold, FontSize = 13.5, Foreground = (Brush)FindResource("Text") });
+                sp.Children.Add(new TextBlock { Text = "@" + uname, FontSize = 11.5, Foreground = (Brush)FindResource("Muted") });
+                Grid.SetColumn(sp, 1);
+                g.Children.Add(sp);
+                row.Child = g;
+                var targetUid = uid;
+                row.MouseLeftButtonUp += async (_, _) => await OpenDmWithAsync(targetUid);
+                UserResults.Children.Add(row);
+            }
+            if (UserResults.Children.Count == 0)
+                UserResults.Children.Add(new TextBlock { Text = "Никого не найдено", Foreground = (Brush)FindResource("Muted"), Margin = new Thickness(8) });
+        }
+        catch { }
+    }
+
+    async Task OpenDmWithAsync(string targetUid)
+    {
+        try
+        {
+            var ids = new[] { Fire.Uid, targetUid }.OrderBy(x => x).ToArray();
+            var chatId = $"dm_{ids[0]}_{ids[1]}";
+            var existing = await Fire.GetDocAsync($"chats/{chatId}");
+            if (existing == null)
+                await Fire.SetDocAsync($"chats/{chatId}", new()
+                {
+                    ["type"] = "private",
+                    ["members"] = new List<object?> { ids[0], ids[1] },
+                    ["createdAt"] = DateTimeOffset.UtcNow.ToUnixTimeMilliseconds(),
+                    ["lastRead"] = new Dictionary<string, object?>(),
+                    ["unread"] = new Dictionary<string, object?>(),
+                    ["pinnedBy"] = new List<object?>(),
+                    ["muted"] = new List<object?>(),
+                });
+            NewChatPanel.Visibility = Visibility.Collapsed;
+            await PollChatsAsync();
+            await OpenChatAsync(chatId);
+        }
+        catch (FireException ex) { MessageBox.Show(ex.Ru, "SandyGram"); }
+    }
+
+    async void CreateGroup_Click(object sender, RoutedEventArgs e) => await CreateGroupChatAsync("group");
+    async void CreateChannel_Click(object sender, RoutedEventArgs e) => await CreateGroupChatAsync("channel");
+    async Task CreateGroupChatAsync(string kind)
+    {
+        var title = NewGroupTitle.Text.Trim();
+        if (title.Length == 0) { MessageBox.Show("Введите название", "SandyGram"); return; }
+        try
+        {
+            var chatId = $"grp_{Fire.RandomId(16)}";
+            await Fire.SetDocAsync($"chats/{chatId}", new()
+            {
+                ["type"] = kind,
+                ["title"] = title.Length > 60 ? title[..60] : title,
+                ["members"] = new List<object?> { Fire.Uid },
+                ["ownerUid"] = Fire.Uid,
+                ["admins"] = new List<object?>(),
+                ["avatarColor"] = (long)Random.Shared.Next(7),
+                ["createdAt"] = DateTimeOffset.UtcNow.ToUnixTimeMilliseconds(),
+                ["lastRead"] = new Dictionary<string, object?>(),
+                ["unread"] = new Dictionary<string, object?>(),
+                ["pinnedBy"] = new List<object?>(),
+                ["muted"] = new List<object?>(),
+            });
+            NewGroupTitle.Text = "";
+            NewChatPanel.Visibility = Visibility.Collapsed;
+            await PollChatsAsync();
+            await OpenChatAsync(chatId);
+        }
+        catch (FireException ex) { MessageBox.Show(ex.Ru, "SandyGram"); }
+    }
+
     void SearchBox_Changed(object sender, TextChangedEventArgs e)
     {
         searchFilter = SearchBox.Text.Trim().ToLowerInvariant();
@@ -374,6 +499,9 @@ public partial class MainWindow : Window
     {
         try
         {
+            // звук, если событие не в открытом чате или окно не в фокусе
+            if (chatId != currentChatId || !IsActive)
+                try { System.Media.SystemSounds.Asterisk.Play(); } catch { }
             if (chatId == currentChatId) await PollMessagesAsync(); // дельта: только новые
             // обновляем одну строку списка (1 чтение), а не весь список
             var doc = await Fire.GetDocAsync($"chats/{chatId}");
@@ -463,6 +591,11 @@ public partial class MainWindow : Window
         }));
         if (sig == lastListSignature) return;
         lastListSignature = sig;
+
+        long totalUnread = 0;
+        foreach (var kv in chats)
+            if (Fire.FMap(kv.Value, "unread").TryGetValue(Fire.Uid, out var uu) && uu is long ul2) totalUnread += ul2;
+        Title = totalUnread > 0 ? $"SandyGram ({totalUnread})" : "SandyGram";
 
         ChatList.Children.Clear();
         foreach (var (id, f) in ordered)
@@ -560,6 +693,8 @@ public partial class MainWindow : Window
     }
 
     // ================================================================ переписка
+    bool IsForumChat(JsonNode f) => Fire.FList(f, "topics").Count > 0;
+
     async Task OpenChatAsync(string chatId)
     {
         if (!string.IsNullOrEmpty(currentChatId) && currentChatId != chatId)
@@ -568,6 +703,9 @@ public partial class MainWindow : Window
             else drafts.Remove(currentChatId);
         }
         MsgInput.Text = drafts.TryGetValue(chatId, out var d) ? d : "";
+        currentTopicId = "";
+        TopicBackBtn.Visibility = Visibility.Collapsed;
+        replyTo = null; ReplyBar.Visibility = Visibility.Collapsed;
         currentChatId = chatId;
         lastMsgSignature = ""; lastListSignature = "";
         loadedMsgs.Clear(); lastMaxCreated = 0;
@@ -580,14 +718,16 @@ public partial class MainWindow : Window
         ChatHeader.Visibility = Visibility.Visible;
         EmptyState.Visibility = Visibility.Collapsed;
 
-        // канал: пишут только админы
+        // канал: пишут только админы; форум: сначала список топиков
         var type = Fire.FStr(f, "type");
         var admins = Fire.FList(f, "admins").Select(a => a as string).ToList();
         var isAdmin = Fire.FStr(f, "ownerUid") == Fire.Uid || admins.Contains(Fire.Uid);
-        Composer.Visibility = type == "channel" && !isAdmin ? Visibility.Collapsed : Visibility.Visible;
+        var forum = IsForumChat(f);
+        Composer.Visibility = (type == "channel" && !isAdmin) || forum ? Visibility.Collapsed : Visibility.Visible;
 
         await RenderChatListAsync();
         await PollMessagesAsync(force: true);
+        if (forum) RenderTopicList();
         await MarkReadAsync(chatId);
         MsgInput.Focus();
     }
@@ -640,6 +780,55 @@ public partial class MainWindow : Window
             await MarkReadAsync(currentChatId);
     }
 
+    void RenderTopicList()
+    {
+        if (!chats.TryGetValue(currentChatId, out var f)) return;
+        currentTopicId = "";
+        TopicBackBtn.Visibility = Visibility.Collapsed;
+        Composer.Visibility = Visibility.Collapsed;
+        ChatSubtitle.Text = "выберите топик";
+        MsgList.Children.Clear();
+        var topics = new List<Dictionary<string, object?>> { new() { ["id"] = "general", ["title"] = "Общий", ["icon"] = "#" } };
+        foreach (var t in Fire.FList(f, "topics"))
+            if (t is Dictionary<string, object?> td) topics.Add(td);
+        foreach (var t in topics)
+        {
+            var tid = t.TryGetValue("id", out var ti) ? ti as string ?? "general" : "general";
+            var title = t.TryGetValue("title", out var tt) ? tt as string ?? "" : "";
+            var icon = t.TryGetValue("icon", out var tic) ? tic as string ?? "#" : "#";
+            var closed = t.TryGetValue("closed", out var tc) && tc is bool cb && cb;
+            var row = new Border { Style = (Style)FindResource("ChatRow"), Padding = new Thickness(12, 10, 12, 10), Margin = new Thickness(0, 2, 0, 2) };
+            var g = new Grid();
+            g.ColumnDefinitions.Add(new ColumnDefinition { Width = GridLength.Auto });
+            g.ColumnDefinitions.Add(new ColumnDefinition { Width = new GridLength(1, GridUnitType.Star) });
+            var iconBox = new Border { Width = 40, Height = 40, CornerRadius = new CornerRadius(11), Background = (Brush)FindResource("Surface2") };
+            iconBox.Child = new TextBlock { Text = icon, FontSize = 18, HorizontalAlignment = HorizontalAlignment.Center, VerticalAlignment = VerticalAlignment.Center };
+            g.Children.Add(iconBox);
+            var tb = new TextBlock { Text = title + (closed ? "  🔒" : ""), FontWeight = FontWeights.Bold, FontSize = 14, Foreground = (Brush)FindResource("Text"), VerticalAlignment = VerticalAlignment.Center, Margin = new Thickness(10, 0, 0, 0) };
+            Grid.SetColumn(tb, 1);
+            g.Children.Add(tb);
+            row.Child = g;
+            var topicId = tid; var topicTitle = title; var topicClosed = closed;
+            row.MouseLeftButtonUp += (_, _) => EnterTopic(topicId, topicTitle, topicClosed);
+            MsgList.Children.Add(row);
+        }
+    }
+
+    void EnterTopic(string topicId, string title, bool closed)
+    {
+        currentTopicId = topicId;
+        TopicBackBtn.Visibility = Visibility.Visible;
+        ChatSubtitle.Text = "# " + title;
+        var isAdmin = false;
+        if (chats.TryGetValue(currentChatId, out var f))
+            isAdmin = Fire.FStr(f, "ownerUid") == Fire.Uid || Fire.FList(f, "admins").Any(a => a as string == Fire.Uid);
+        Composer.Visibility = closed && !isAdmin ? Visibility.Collapsed : Visibility.Visible;
+        RenderMessages(scrollBottom: true);
+        MsgInput.Focus();
+    }
+
+    void TopicBackBtn_Click(object sender, RoutedEventArgs e) => RenderTopicList();
+
     void RenderMessages(bool scrollBottom = false)
     {
         long lastReadByOthers = 0;
@@ -652,12 +841,19 @@ public partial class MainWindow : Window
         }
         lastTicksMark = lastReadByOthers;
 
+        var forum = chatFields != null && IsForumChat(chatFields);
+        if (forum && currentTopicId.Length == 0) { RenderTopicList(); return; }
         var wasAtBottom = MsgScroll.VerticalOffset >= MsgScroll.ScrollableHeight - 60;
         MsgList.Children.Clear();
         string lastDay = "";
         foreach (var (id, m) in loadedMsgs.OrderBy(r => Fire.FLong(r.Fields, "createdAt")))
         {
             if (Fire.F(m, "deleted") is bool d && d) continue;
+            if (forum)
+            {
+                var mt = Fire.FStr(m, "topicId");
+                if ((mt.Length == 0 ? "general" : mt) != currentTopicId) continue;
+            }
             var created = Fire.FLong(m, "createdAt");
             var day = DateTimeOffset.FromUnixTimeMilliseconds(created).ToLocalTime().ToString("d MMMM");
             if (day != lastDay)
@@ -818,6 +1014,53 @@ public partial class MainWindow : Window
         }
 
         bubble.Child = stack;
+
+        // даблклик = ❤️, правый клик = меню
+        var msgId2 = id;
+        bubble.MouseLeftButtonDown += (_, e2) => { if (e2.ClickCount == 2) _ = ToggleReactionAsync(msgId2, "❤️"); };
+        var menu = new ContextMenu();
+        var miReply = new MenuItem { Header = "↩ Ответить" };
+        var senderName = Fire.FStr(m, "senderName");
+        var msgText = Fire.FStr(m, "text");
+        miReply.Click += (_, _) =>
+        {
+            replyTo = (msgId2, senderName, msgText.Length > 120 ? msgText[..120] : (msgText.Length > 0 ? msgText : "📷 Фото"));
+            ReplyTitle.Text = "Ответ: " + senderName;
+            ReplyText.Text = replyTo.Value.Text;
+            ReplyBar.Visibility = Visibility.Visible;
+            MsgInput.Focus();
+        };
+        menu.Items.Add(miReply);
+        var miCopy = new MenuItem { Header = "⧉ Копировать" };
+        miCopy.Click += (_, _) => { try { Clipboard.SetText(msgText); } catch { } };
+        menu.Items.Add(miCopy);
+        foreach (var emoji in new[] { "❤️", "👍", "🔥", "😂" })
+        {
+            var mi = new MenuItem { Header = emoji + " Реакция" };
+            var em = emoji;
+            mi.Click += (_, _) => _ = ToggleReactionAsync(msgId2, em);
+            menu.Items.Add(mi);
+        }
+        var isAdminNow = chats.TryGetValue(currentChatId, out var cf2) &&
+            (Fire.FStr(cf2, "ownerUid") == Fire.Uid || Fire.FList(cf2, "admins").Any(a => a as string == Fire.Uid));
+        if (mine || isAdminNow)
+        {
+            var miDel = new MenuItem { Header = "🗑 Удалить" };
+            miDel.Click += async (_, _) =>
+            {
+                try
+                {
+                    await Fire.PatchDocAsync($"chats/{currentChatId}/messages/{msgId2}",
+                        new() { ["deleted"] = true, ["text"] = "", ["image"] = null, ["reactions"] = new Dictionary<string, object?>() });
+                    _ = BumpAsync(currentChatId);
+                    loadedMsgs.RemoveAll(x => x.Id == msgId2);
+                    RenderMessages();
+                }
+                catch (FireException ex) { MessageBox.Show(ex.Ru, "SandyGram"); }
+            };
+            menu.Items.Add(miDel);
+        }
+        bubble.ContextMenu = menu;
         return bubble;
     }
 
@@ -856,6 +1099,190 @@ public partial class MainWindow : Window
             System.Diagnostics.Process.Start(new System.Diagnostics.ProcessStartInfo(tmp) { UseShellExecute = true });
         }
         catch (Exception ex) { MessageBox.Show(ex.Message, "SandyGram"); }
+    }
+
+    // ================================================================ единая отправка
+    async Task SendPayloadAsync(Dictionary<string, object?> extra, string previewText)
+    {
+        if (string.IsNullOrEmpty(currentChatId) || !chats.TryGetValue(currentChatId, out var f)) return;
+        var now = DateTimeOffset.UtcNow.ToUnixTimeMilliseconds();
+        var msgId = Fire.RandomId();
+        var members = Fire.FList(f, "members").Select(m => m as string).Where(m => m != null).ToList();
+        var msg = new Dictionary<string, object?>
+        {
+            ["sender"] = Fire.Uid,
+            ["senderName"] = myDisplayName.Length > 0 ? myDisplayName : myUsername,
+            ["text"] = "",
+            ["image"] = null,
+            ["createdAt"] = now,
+            ["reactions"] = new Dictionary<string, object?>(),
+            ["topicId"] = currentTopicId.Length > 0 ? currentTopicId : "general",
+        };
+        foreach (var kv in extra) msg[kv.Key] = kv.Value;
+        if (replyTo != null && extra.ContainsKey("text"))
+            msg["replyTo"] = new Dictionary<string, object?> { ["id"] = replyTo.Value.Id, ["sender"] = replyTo.Value.Sender, ["text"] = replyTo.Value.Text };
+        var chatUpdateFields = Fire.ToFsFields(new()
+        {
+            ["lastMessage"] = new Dictionary<string, object?>
+            {
+                ["text"] = previewText,
+                ["senderUid"] = Fire.Uid,
+                ["senderName"] = myDisplayName.Length > 0 ? myDisplayName : myUsername,
+                ["createdAt"] = now,
+                ["hasImage"] = extra.ContainsKey("image") && extra["image"] != null,
+            },
+            ["lastRead"] = new Dictionary<string, object?> { [Fire.Uid] = now },
+            ["unread"] = new Dictionary<string, object?> { [Fire.Uid] = 0L },
+        });
+        var transforms = members.Where(mb => mb != Fire.Uid).Select(mb => new
+        {
+            fieldPath = $"unread.{mb}",
+            increment = new { integerValue = "1" },
+        }).ToArray();
+        var writes = new List<object>
+        {
+            new
+            {
+                update = new { name = Fire.DocName($"chats/{currentChatId}/messages/{msgId}"), fields = Fire.ToFsFields(msg) },
+                currentDocument = new { exists = false },
+            },
+            new
+            {
+                update = new { name = Fire.DocName($"chats/{currentChatId}"), fields = chatUpdateFields },
+                updateMask = new { fieldPaths = new[] { "lastMessage", $"lastRead.{Fire.Uid}", $"unread.{Fire.Uid}" } },
+                updateTransforms = transforms,
+            },
+        };
+        await Fire.CommitAsync(writes.ToArray());
+        replyTo = null;
+        ReplyBar.Visibility = Visibility.Collapsed;
+        _ = BumpAsync(currentChatId);
+        await PollMessagesAsync();
+    }
+
+    void CancelReply_Click(object sender, RoutedEventArgs e)
+    {
+        replyTo = null;
+        ReplyBar.Visibility = Visibility.Collapsed;
+    }
+
+    // фото
+    async void AttachBtn_Click(object sender, RoutedEventArgs e)
+    {
+        var dlg = new Microsoft.Win32.OpenFileDialog { Filter = "Изображения|*.jpg;*.jpeg;*.png;*.webp;*.bmp" };
+        if (dlg.ShowDialog() != true) return;
+        try
+        {
+            var dataUrl = EncodeImage(dlg.FileName, 1100, 80);
+            if (dataUrl.Length > 700_000) dataUrl = EncodeImage(dlg.FileName, 800, 60);
+            if (dataUrl.Length > 900_000) { MessageBox.Show("Фото слишком большое", "SandyGram"); return; }
+            await SendPayloadAsync(new() { ["image"] = dataUrl }, "📷 Фото");
+        }
+        catch (FireException ex) { MessageBox.Show(ex.Ru, "SandyGram"); }
+        catch (Exception ex) { MessageBox.Show(ex.Message, "SandyGram"); }
+    }
+
+    static string EncodeImage(string path, int maxSide, int quality)
+    {
+        var src = new BitmapImage();
+        src.BeginInit(); src.CacheOption = BitmapCacheOption.OnLoad; src.UriSource = new Uri(path); src.EndInit();
+        double scale = Math.Min(1.0, (double)maxSide / Math.Max(src.PixelWidth, src.PixelHeight));
+        BitmapSource frame = scale < 1.0 ? new TransformedBitmap(src, new ScaleTransform(scale, scale)) : src;
+        var enc = new JpegBitmapEncoder { QualityLevel = quality };
+        enc.Frames.Add(BitmapFrame.Create(frame));
+        using var ms = new MemoryStream();
+        enc.Save(ms);
+        return "data:image/jpeg;base64," + Convert.ToBase64String(ms.ToArray());
+    }
+
+    // стикеры
+    void StickerBtn_Click(object sender, RoutedEventArgs e)
+    {
+        if (StickerGrid.Children.Count == 0)
+            foreach (var code in StickerCodes)
+            {
+                var img = new Image { Width = 62, Height = 62, Margin = new Thickness(5), Cursor = Cursors.Hand };
+                var bmp = TryImage($"{Site}/stickers/{code}.png");
+                if (bmp != null) img.Source = bmp;
+                var c = code;
+                img.MouseLeftButtonUp += async (_, _) =>
+                {
+                    StickerPanel.Visibility = Visibility.Collapsed;
+                    try { await SendPayloadAsync(new() { ["sticker"] = c }, "🧩 Стикер"); }
+                    catch (FireException ex) { MessageBox.Show(ex.Ru, "SandyGram"); }
+                };
+                StickerGrid.Children.Add(img);
+            }
+        StickerPanel.Visibility = Visibility.Visible;
+    }
+    void CloseStickers_Click(object sender, RoutedEventArgs e) => StickerPanel.Visibility = Visibility.Collapsed;
+
+    // голосовые (NAudio: WAV → AAC m4a)
+    async void MicBtn_Click(object sender, RoutedEventArgs e)
+    {
+        if (recorder != null)
+        {
+            try
+            {
+                recorder.StopRecording();
+                recorder.Dispose(); recorder = null;
+                recWriter?.Dispose(); recWriter = null;
+                MicBtn.Content = "🎙";
+                var dur = Math.Max(1, (int)Math.Round((DateTime.UtcNow - recStart).TotalSeconds));
+                var m4a = Path.ChangeExtension(recPath, ".m4a");
+                using (var reader = new NAudio.Wave.AudioFileReader(recPath))
+                    NAudio.Wave.MediaFoundationEncoder.EncodeToAac(reader, m4a, 32000);
+                var bytes = File.ReadAllBytes(m4a);
+                File.Delete(recPath); File.Delete(m4a);
+                var dataUrl = "data:audio/mp4;base64," + Convert.ToBase64String(bytes);
+                if (dataUrl.Length > 900_000) { MessageBox.Show("Слишком длинное голосовое (макс ~1 минута)", "SandyGram"); return; }
+                await SendPayloadAsync(new() { ["voice"] = new Dictionary<string, object?> { ["data"] = dataUrl, ["duration"] = (long)dur } }, "🎤 Голосовое сообщение");
+            }
+            catch (FireException ex) { MessageBox.Show(ex.Ru, "SandyGram"); }
+            catch (Exception ex) { MessageBox.Show("Не удалось записать: " + ex.Message, "SandyGram"); }
+            return;
+        }
+        try
+        {
+            recPath = Path.Combine(Path.GetTempPath(), $"sg_rec_{Guid.NewGuid():N}.wav");
+            recorder = new NAudio.Wave.WaveInEvent { WaveFormat = new NAudio.Wave.WaveFormat(22050, 16, 1) };
+            recWriter = new NAudio.Wave.WaveFileWriter(recPath, recorder.WaveFormat);
+            recorder.DataAvailable += (_, a) => recWriter?.Write(a.Buffer, 0, a.BytesRecorded);
+            recorder.StartRecording();
+            recStart = DateTime.UtcNow;
+            MicBtn.Content = "⏹";
+        }
+        catch (Exception ex) { MessageBox.Show("Нет доступа к микрофону: " + ex.Message, "SandyGram"); recorder = null; }
+    }
+
+    // реакции
+    async Task ToggleReactionAsync(string messageId, string emoji)
+    {
+        var msg = loadedMsgs.FirstOrDefault(x => x.Id == messageId);
+        if (msg.Fields == null) return;
+        var reactions = Fire.FMap(msg.Fields, "reactions");
+        var mine = reactions.TryGetValue(emoji, out var lst) && lst is List<object?> l && l.Any(x => x as string == Fire.Uid);
+        var fieldPath = "reactions." + Bq(emoji);
+        object transform = mine
+            ? new { fieldPath, removeAllFromArray = new { values = new[] { new { stringValue = Fire.Uid } } } }
+            : new { fieldPath, appendMissingElements = new { values = new[] { new { stringValue = Fire.Uid } } } };
+        var writes = new object[]
+        {
+            new { transform = new { document = Fire.DocName($"chats/{currentChatId}/messages/{messageId}"), fieldTransforms = new[] { transform } } },
+        };
+        try
+        {
+            await Fire.CommitAsync(writes);
+            _ = BumpAsync(currentChatId);
+            var fresh = await Fire.GetDocAsync($"chats/{currentChatId}/messages/{messageId}");
+            if (fresh?["fields"] != null)
+            {
+                loadedMsgs.RemoveAll(x => x.Id == messageId);
+                loadedMsgs.Add((messageId, fresh["fields"]!));
+                RenderMessages();
+            }
+        }
+        catch (FireException ex) { MessageBox.Show(ex.Ru, "SandyGram"); }
     }
 
     // ================================================================ отправка
