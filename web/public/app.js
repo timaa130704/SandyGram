@@ -295,6 +295,8 @@ function showAuth() {
 }
 function teardown() {
   chatsUnsub?.(); chatsUnsub = null;
+  storiesUnsub?.(); storiesUnsub = null;
+  stories = [];
   messagesUnsub?.(); messagesUnsub = null;
   for (const unsub of peerUnsubs.values()) unsub();
   peerUnsubs.clear(); userCache.clear();
@@ -310,7 +312,130 @@ function showMessenger() {
   startPresence();
   maybeJoinInvite();
   initWebPush();
+  subscribeStories();
 }
+
+// ---------- истории ----------
+let stories = [];            // все живые истории
+let storiesUnsub = null;
+let viewerList = [];         // истории открытого юзера
+let viewerIndex = 0;
+let viewerTimer = null;
+
+function subscribeStories() {
+  storiesUnsub?.();
+  const q = query(collection(dbf, "stories"), where("expiresAt", ">", Date.now()));
+  storiesUnsub = onSnapshot(q, (snap) => {
+    stories = snap.docs.map(d => ({ id: d.id, ...d.data() })).filter(st => st.expiresAt > Date.now());
+    renderStoriesBar();
+  }, () => {});
+}
+
+function renderStoriesBar() {
+  const bar = $("#storiesBar");
+  if (!bar) return;
+  bar.replaceChildren();
+  const byUser = new Map();
+  for (const st of stories.sort((a, b) => a.createdAt - b.createdAt)) {
+    if (!byUser.has(st.uid)) byUser.set(st.uid, []);
+    byUser.get(st.uid).push(st);
+  }
+  // моя ячейка всегда первая
+  const mine = byUser.get(me.uid) || [];
+  const myBtn = document.createElement("button");
+  myBtn.className = "story-circle me" + (mine.length ? "" : " story-plus");
+  myBtn.innerHTML = `<span class="ring">${avatarHtml(me.avatarColor, (me.displayName || me.username)[0].toUpperCase(), me.avatar)}</span><small>Моя история</small>`;
+  myBtn.addEventListener("click", () => mine.length ? openStoryViewer(me.uid) : $("#storyInput").click());
+  bar.appendChild(myBtn);
+  byUser.delete(me.uid);
+  // остальные — непросмотренные первыми
+  const others = [...byUser.entries()].sort(([, a], [, b]) => {
+    const unA = a.some(st => !(st.views || {})[me.uid]) ? 0 : 1;
+    const unB = b.some(st => !(st.views || {})[me.uid]) ? 0 : 1;
+    return unA - unB || b[b.length - 1].createdAt - a[a.length - 1].createdAt;
+  });
+  for (const [uid, list] of others) {
+    const first = list[0];
+    const unseen = list.some(st => !(st.views || {})[me.uid]);
+    const btn = document.createElement("button");
+    btn.className = "story-circle" + (unseen ? " unseen" : "");
+    btn.innerHTML = `<span class="ring">${avatarHtml(first.avatarColor ?? 0, (first.displayName || "?")[0].toUpperCase(), first.avatar)}</span><small>${escapeHtml(first.displayName || first.username)}</small>`;
+    btn.addEventListener("click", () => openStoryViewer(uid));
+    bar.appendChild(btn);
+  }
+}
+
+$("#storyInput").addEventListener("change", async () => {
+  const file = $("#storyInput").files[0];
+  $("#storyInput").value = "";
+  if (!file) return;
+  let image = await compressImage(file, 1080, 0.8);
+  if (image && image.length > 700_000) image = await compressImage(file, 720, 0.6);
+  if (!image) return toast("Не удалось обработать фото");
+  try {
+    await setDoc(doc(collection(dbf, "stories")), {
+      uid: me.uid, username: me.username, displayName: me.displayName || me.username,
+      avatar: me.avatar || null, avatarColor: me.avatarColor ?? 0,
+      image, createdAt: Date.now(), expiresAt: Date.now() + 86400e3, views: {},
+    });
+    toast("История опубликована на 24 часа");
+  } catch (error) { toast(ruError(error)); }
+});
+
+function openStoryViewer(uid) {
+  viewerList = stories.filter(st => st.uid === uid).sort((a, b) => a.createdAt - b.createdAt);
+  if (!viewerList.length) return;
+  viewerIndex = viewerList.findIndex(st => !(st.views || {})[me.uid]);
+  if (viewerIndex < 0) viewerIndex = 0;
+  $("#storyViewer").classList.remove("hidden");
+  showStory();
+}
+function showStory() {
+  const st = viewerList[viewerIndex];
+  if (!st) return closeStoryViewer();
+  $("#storyImage").src = st.image;
+  $("#storyAvatar").innerHTML = avatarHtml(st.avatarColor ?? 0, (st.displayName || "?")[0].toUpperCase(), st.avatar);
+  $("#storyName").textContent = st.uid === me.uid ? "Моя история" : (st.displayName || st.username);
+  const mins = Math.max(1, Math.round((Date.now() - st.createdAt) / 60e3));
+  $("#storyTime").textContent = mins < 60 ? `${mins} мин назад` : `${Math.round(mins / 60)} ч назад`;
+  $("#storyDelete").hidden = st.uid !== me.uid;
+  $("#storyAdd").hidden = st.uid !== me.uid;
+  $("#storyViews").textContent = st.uid === me.uid ? `👁 ${Object.keys(st.views || {}).length}` : "";
+  // прогресс
+  const prog = $("#storyProgress");
+  prog.innerHTML = viewerList.map((_, i) =>
+    `<i class="${i < viewerIndex ? "done" : i === viewerIndex ? "active" : ""}"><b></b></i>`).join("");
+  // отметка просмотра
+  if (st.uid !== me.uid && !(st.views || {})[me.uid]) {
+    updateDoc(doc(dbf, "stories", st.id), { [`views.${me.uid}`]: Date.now() }).catch(() => {});
+    st.views = { ...(st.views || {}), [me.uid]: Date.now() };
+  }
+  clearTimeout(viewerTimer);
+  viewerTimer = setTimeout(nextStory, 5000);
+}
+function nextStory() {
+  if (viewerIndex < viewerList.length - 1) { viewerIndex++; showStory(); }
+  else closeStoryViewer();
+}
+function prevStory() {
+  if (viewerIndex > 0) { viewerIndex--; showStory(); }
+}
+function closeStoryViewer() {
+  clearTimeout(viewerTimer);
+  $("#storyViewer").classList.add("hidden");
+  renderStoriesBar();
+}
+$("#storyClose").addEventListener("click", closeStoryViewer);
+$("#storyNext").addEventListener("click", nextStory);
+$("#storyPrev").addEventListener("click", prevStory);
+$("#storyAdd").addEventListener("click", () => { closeStoryViewer(); $("#storyInput").click(); });
+$("#storyDelete").addEventListener("click", async () => {
+  const st = viewerList[viewerIndex];
+  if (!st || st.uid !== me.uid) return;
+  clearTimeout(viewerTimer);
+  try { await deleteDoc(doc(dbf, "stories", st.id)); toast("История удалена"); } catch (error) { toast(ruError(error)); }
+  closeStoryViewer();
+});
 
 // Веб-пуши: включаются, когда в firebase-config.js задан VAPID_KEY
 async function initWebPush() {

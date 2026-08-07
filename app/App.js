@@ -47,7 +47,7 @@ const AVATAR_TONES = ["#2b2b2b", "#3a3a3a", "#4a4a4a", "#5a5a5a", "#6b6b6b", "#7
 const ONLINE_WINDOW = 70e3;
 const QUICK_REACTIONS = ["❤️", "👍", "🔥", "😂", "😮", "😢"];
 const SITE = "https://sandygram-a3b42.web.app";
-const APP_VERSION = "1.3.0";
+const APP_VERSION = "1.4.0";
 const APK_URL = "https://github.com/timaa130704/SandyGram/releases/latest/download/SandyGram.apk";
 // Сигнальная шина RTDB — для мгновенного realtime у ПК-клиента
 const RTDB = "https://sandygram-a3b42-default-rtdb.europe-west1.firebasedatabase.app";
@@ -210,6 +210,7 @@ function SandyGram() {
   const [pendingInvite, setPendingInvite] = useState(null);
   const [myPrefs, setMyPrefs] = useState({ blocked: [], hideLastSeen: false });
   const [needName, setNeedName] = useState(null); // {uid, email, displayName, photoURL}
+  const [stories, setStories] = useState([]);
 
   useEffect(() => { AsyncStorage.getItem("theme").then(v => v && setThemeName(v)); }, []);
   const toggleTheme = () => { const n = themeName === "dark" ? "light" : "dark"; setThemeName(n); AsyncStorage.setItem("theme", n); };
@@ -321,6 +322,16 @@ function SandyGram() {
     return () => { clearInterval(t); sub.remove(); };
   }, [me?.uid]);
 
+  // ---- истории ----
+  useEffect(() => {
+    if (!me?.uid) return;
+    const q = query(collection(db, "stories"), where("expiresAt", ">", Date.now()));
+    const unsub = onSnapshot(q, (snap) => {
+      setStories(snap.docs.map(d => ({ id: d.id, ...d.data() })).filter(st => st.expiresAt > Date.now()));
+    }, () => { });
+    return unsub;
+  }, [me?.uid]);
+
   // ---- приватные настройки (чёрный список) ----
   useEffect(() => {
     if (!me?.uid) return;
@@ -429,7 +440,7 @@ function SandyGram() {
 
   if (!booted) return <View style={{ flex: 1, backgroundColor: "#0a0a0a", alignItems: "center", justifyContent: "center" }}><ActivityIndicator color="#888" /></View>;
 
-  const ctx = { T, me, setMe, chats, users, viewOf, fetchUser, screen, setScreen, themeName, toggleTheme, openDmWith, openDmByName, joinByCode, myPrefs, setMyPrefs };
+  const ctx = { T, me, setMe, chats, users, viewOf, fetchUser, screen, setScreen, themeName, toggleTheme, openDmWith, openDmByName, joinByCode, myPrefs, setMyPrefs, stories };
   return (
     <View style={{ flex: 1, backgroundColor: T.bg }}>
       <StatusBar style={themeName === "dark" ? "light" : "dark"} />
@@ -586,7 +597,41 @@ function PickNameScreen({ ctx, pending, onDone }) {
 
 // ================================================================ СПИСОК ЧАТОВ
 function ListScreen({ ctx }) {
-  const { T, me, chats, viewOf, setScreen } = ctx;
+  const { T, me, chats, viewOf, setScreen, stories } = ctx;
+  const [storyViewUid, setStoryViewUid] = useState(null);
+  const publishStory = async () => {
+    try {
+      const res = await ImagePicker.launchImageLibraryAsync({ mediaTypes: ["images"], quality: 1 });
+      if (res.canceled || !res.assets?.[0]?.uri) return;
+      const small = await ImageManipulator.manipulateAsync(res.assets[0].uri, [{ resize: { width: 1080 } }], { compress: 0.7, format: ImageManipulator.SaveFormat.JPEG, base64: true });
+      let image = `data:image/jpeg;base64,${small.base64}`;
+      if (image.length > 700_000) {
+        const tiny = await ImageManipulator.manipulateAsync(res.assets[0].uri, [{ resize: { width: 720 } }], { compress: 0.55, format: ImageManipulator.SaveFormat.JPEG, base64: true });
+        image = `data:image/jpeg;base64,${tiny.base64}`;
+      }
+      if (image.length > 900_000) return Alert.alert("", "Фото слишком большое");
+      await setDoc(doc(collection(db, "stories")), {
+        uid: me.uid, username: me.username, displayName: me.displayName || me.username,
+        avatar: me.avatar || null, avatarColor: me.avatarColor ?? 0,
+        image, createdAt: Date.now(), expiresAt: Date.now() + 86400e3, views: {},
+      });
+    } catch (e) { Alert.alert("Ошибка", ruError(e)); }
+  };
+  const storyUsers = useMemo(() => {
+    const byUser = new Map();
+    for (const st of [...stories].sort((a, b) => a.createdAt - b.createdAt)) {
+      if (!byUser.has(st.uid)) byUser.set(st.uid, []);
+      byUser.get(st.uid).push(st);
+    }
+    const mine = byUser.get(me.uid) || [];
+    byUser.delete(me.uid);
+    const others = [...byUser.entries()].sort(([, a], [, b]) => {
+      const unA = a.some(st => !(st.views || {})[me.uid]) ? 0 : 1;
+      const unB = b.some(st => !(st.views || {})[me.uid]) ? 0 : 1;
+      return unA - unB || b[b.length - 1].createdAt - a[a.length - 1].createdAt;
+    });
+    return { mine, others };
+  }, [stories, me.uid]);
   const [settingsOpen, setSettingsOpen] = useState(false);
   const [newChatOpen, setNewChatOpen] = useState(false);
   const [menuChat, setMenuChat] = useState(null);
@@ -672,6 +717,37 @@ function ListScreen({ ctx }) {
           style={{ flex: 1, backgroundColor: T.surface2, color: T.text, borderRadius: 999, paddingHorizontal: 16, paddingVertical: 8, fontSize: 15 }} />
         {!!search && <TouchableOpacity onPress={() => setSearch("")}><MaterialIcons name="close" size={20} color={T.muted} /></TouchableOpacity>}
       </View>
+      <View style={{ paddingHorizontal: 12, paddingBottom: 6 }}>
+        <FlatList horizontal showsHorizontalScrollIndicator={false}
+          data={[{ kind: "me" }, ...storyUsers.others.map(([uid, list]) => ({ kind: "user", uid, list }))]}
+          keyExtractor={(it) => it.kind === "me" ? "me" : it.uid}
+          renderItem={({ item }) => {
+            if (item.kind === "me") {
+              const has = storyUsers.mine.length > 0;
+              return (
+                <TouchableOpacity onPress={() => has ? setStoryViewUid(me.uid) : publishStory()} style={{ alignItems: "center", marginRight: 12, width: 62 }}>
+                  <View style={{ padding: 2.5, borderRadius: 32, backgroundColor: has ? T.inverse : T.outline }}>
+                    <Avatar T={T} label={(me.displayName || me.username)[0].toUpperCase()} color={me.avatarColor} photo={me.avatar} size={54} />
+                    {!has && <View style={{ position: "absolute", right: -1, bottom: -1, width: 20, height: 20, borderRadius: 10, backgroundColor: T.inverse, alignItems: "center", justifyContent: "center", borderWidth: 2, borderColor: T.bg }}>
+                      <MaterialIcons name="add" size={13} color={T.onInverse} />
+                    </View>}
+                  </View>
+                  <Text numberOfLines={1} style={{ color: T.muted, fontSize: 10.5, marginTop: 3 }}>Моя история</Text>
+                </TouchableOpacity>
+              );
+            }
+            const first = item.list[0];
+            const unseen = item.list.some(st => !(st.views || {})[me.uid]);
+            return (
+              <TouchableOpacity onPress={() => setStoryViewUid(item.uid)} style={{ alignItems: "center", marginRight: 12, width: 62 }}>
+                <View style={{ padding: 2.5, borderRadius: 32, backgroundColor: unseen ? T.inverse : T.outline }}>
+                  <Avatar T={T} label={(first.displayName || "?")[0].toUpperCase()} color={first.avatarColor ?? 0} photo={first.avatar} size={54} />
+                </View>
+                <Text numberOfLines={1} style={{ color: T.muted, fontSize: 10.5, marginTop: 3 }}>{first.displayName || first.username}</Text>
+              </TouchableOpacity>
+            );
+          }} />
+      </View>
       <FlatList
         data={shown}
         keyExtractor={v => v.id}
@@ -721,7 +797,64 @@ function ListScreen({ ctx }) {
       {newChatOpen && <NewChatSheet ctx={ctx} onClose={() => setNewChatOpen(false)} />}
       {menuChat && <ActionSheet T={T} items={chatMenuItems(menuChat)} onClose={() => setMenuChat(null)}
         header={<Text style={{ color: T.muted, fontWeight: "700", padding: 8 }}>{menuChat.title}</Text>} />}
+      {storyViewUid && <StoryViewer ctx={ctx} uid={storyViewUid} onClose={() => setStoryViewUid(null)} onAdd={publishStory} />}
     </SafeAreaView>
+  );
+}
+
+// ================================================================ ПРОСМОТРЩИК ИСТОРИЙ
+function StoryViewer({ ctx, uid, onClose, onAdd }) {
+  const { T, me, stories } = ctx;
+  const list = useMemo(() => stories.filter(st => st.uid === uid).sort((a, b) => a.createdAt - b.createdAt), [stories, uid]);
+  const [idx, setIdx] = useState(() => {
+    const i = list.findIndex(st => !(st.views || {})[me.uid]);
+    return i < 0 ? 0 : i;
+  });
+  const st = list[idx];
+  useEffect(() => {
+    if (!st) { onClose(); return; }
+    if (st.uid !== me.uid && !(st.views || {})[me.uid]) {
+      updateDoc(doc(db, "stories", st.id), { [`views.${me.uid}`]: Date.now() }).catch(() => { });
+    }
+    const t = setTimeout(() => { if (idx < list.length - 1) setIdx(idx + 1); else onClose(); }, 5000);
+    return () => clearTimeout(t);
+  }, [idx, st?.id]);
+  if (!st) return null;
+  const mins = Math.max(1, Math.round((Date.now() - st.createdAt) / 60e3));
+  return (
+    <Modal animationType="fade" onRequestClose={onClose}>
+      <View style={{ flex: 1, backgroundColor: "#000" }}>
+        <Image source={{ uri: st.image }} style={{ flex: 1 }} resizeMode="contain" />
+        <View style={{ position: "absolute", top: 12, left: 10, right: 10, flexDirection: "row", gap: 4 }}>
+          {list.map((_, i) => (
+            <View key={i} style={{ flex: 1, height: 3, borderRadius: 2, backgroundColor: i <= idx ? "#fff" : "#ffffff44" }} />
+          ))}
+        </View>
+        <View style={{ position: "absolute", top: 26, left: 12, right: 8, flexDirection: "row", alignItems: "center", gap: 10 }}>
+          <Avatar T={T} label={(st.displayName || "?")[0].toUpperCase()} color={st.avatarColor ?? 0} photo={st.avatar} size={36} />
+          <View style={{ flex: 1 }}>
+            <Text style={{ color: "#fff", fontWeight: "700" }}>{st.uid === me.uid ? "Моя история" : (st.displayName || st.username)}</Text>
+            <Text style={{ color: "#ffffff99", fontSize: 11 }}>{mins < 60 ? `${mins} мин назад` : `${Math.round(mins / 60)} ч назад`}</Text>
+          </View>
+          {st.uid === me.uid && (
+            <TouchableOpacity onPress={() => { onClose(); onAdd(); }} style={{ padding: 8 }}><MaterialIcons name="add" size={24} color="#fff" /></TouchableOpacity>
+          )}
+          {st.uid === me.uid && (
+            <TouchableOpacity onPress={async () => { try { await deleteDoc(doc(db, "stories", st.id)); } catch { } onClose(); }} style={{ padding: 8 }}>
+              <MaterialIcons name="delete" size={22} color="#fff" />
+            </TouchableOpacity>
+          )}
+          <TouchableOpacity onPress={onClose} style={{ padding: 8 }}><MaterialIcons name="close" size={24} color="#fff" /></TouchableOpacity>
+        </View>
+        {st.uid === me.uid && (
+          <Text style={{ position: "absolute", bottom: 24, alignSelf: "center", color: "#ffffffbb", fontSize: 13 }}>
+            👁 {Object.keys(st.views || {}).length}
+          </Text>
+        )}
+        <TouchableOpacity style={{ position: "absolute", left: 0, top: 90, bottom: 60, width: "35%" }} onPress={() => idx > 0 && setIdx(idx - 1)} />
+        <TouchableOpacity style={{ position: "absolute", right: 0, top: 90, bottom: 60, width: "35%" }} onPress={() => idx < list.length - 1 ? setIdx(idx + 1) : onClose()} />
+      </View>
+    </Modal>
   );
 }
 

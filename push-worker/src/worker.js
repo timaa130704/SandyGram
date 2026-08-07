@@ -121,12 +121,30 @@ async function tick(env) {
     }
   }
 
+  // раз в час чистим просроченные истории
+  let cleaned = 0;
+  if (startedAt - (meta?.lastStoryCleanup || 0) > 3600e3) {
+    const expired = await runQuery(H, {
+      from: [{ collectionId: "stories" }],
+      where: { fieldFilter: { field: { fieldPath: "expiresAt" }, op: "LESS_THAN", value: { integerValue: String(startedAt) } } },
+      limit: 100,
+    });
+    for (const st of expired) {
+      await fetch(`${FS_BASE}/stories/${st.id}`, { method: "DELETE", headers: H }).catch(() => {});
+      cleaned++;
+    }
+    await fetch(`${FS_BASE}/meta/push?updateMask.fieldPaths=lastStoryCleanup`, {
+      method: "PATCH", headers: H,
+      body: JSON.stringify({ fields: { lastStoryCleanup: { integerValue: String(startedAt) } } }),
+    });
+  }
+
   // сохраняем отметку
   await fetch(`${FS_BASE}/meta/push?updateMask.fieldPaths=lastRun`, {
     method: "PATCH", headers: H,
     body: JSON.stringify({ fields: { lastRun: { integerValue: String(startedAt) } } }),
   });
-  return { chats: chats.length, sent };
+  return { chats: chats.length, sent, cleaned };
 }
 
 export default {

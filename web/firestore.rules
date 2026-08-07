@@ -29,6 +29,14 @@ service cloud.firestore {
       allow get: if true;
     }
 
+    // Истории: живут 24 часа (чистит push-worker), чужие можно только «просмотреть»
+    match /stories/{storyId} {
+      allow read: if authed();
+      allow create: if authed() && request.resource.data.uid == request.auth.uid;
+      allow update: if authed() && request.resource.data.diff(resource.data).affectedKeys().hasOnly(['views']);
+      allow delete: if authed() && resource.data.uid == request.auth.uid;
+    }
+
     // Карточки инвайтов: только точечное чтение по коду, перебор запрещён
     match /invites/{code} {
       allow get: if authed();
