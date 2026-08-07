@@ -11,6 +11,7 @@ import {
   deleteDoc, collection, query, where, orderBy, limit, onSnapshot, runTransaction,
   arrayUnion, arrayRemove, increment, writeBatch, deleteField,
 } from "https://www.gstatic.com/firebasejs/10.14.1/firebase-firestore.js";
+import { getMessaging, getToken } from "https://www.gstatic.com/firebasejs/10.14.1/firebase-messaging.js";
 
 const fbApp = initializeApp(window.FIREBASE_CONFIG);
 const auth = getAuth(fbApp);
@@ -41,6 +42,14 @@ let heartbeatTimer = null;
 const EMOJI = "😀 😃 😄 😁 😆 😅 😂 🙂 🙃 😉 😊 😍 🥰 😘 😎 🤓 🤔 😐 😶 🙄 😏 😮 😪 🥱 😴 😌 😋 😜 🤪 🤗 🤭 🤫 😱 😨 😭 😤 😡 🤯 😳 🥳 🤩 🥺 🤢 🤧 😷 🤑 👋 ✋ 🤝 👍 👎 👌 ✌️ 🤞 🙏 💪 👀 ❤️ 🖤 🤍 💔 💯 🔥 ⭐ ✨ 🎉 🎁 🎯 🚀 ⚡ ☕ 🍕 🌙 ☀️".split(" ");
 const QUICK_REACTIONS = ["❤️", "👍", "🔥", "😂", "😮", "😢"];
 const ONLINE_WINDOW = 70e3; // «в сети», если lastSeen свежее этого
+// Сигнальная шина на RTDB: пишем «в чате что-то произошло», чтобы ПК-клиент не опрашивал Firestore
+const RTDB = "https://sandygram-a3b42-default-rtdb.europe-west1.firebasedatabase.app";
+async function bumpChat(chatId) {
+  try {
+    const t = await auth.currentUser.getIdToken();
+    fetch(`${RTDB}/bump/${encodeURIComponent(chatId)}.json?auth=${t}`, { method: "PUT", body: String(Date.now()) }).catch(() => {});
+  } catch { /* не критично */ }
+}
 // Коды OpenMoji из public/stickers/
 const STICKERS = ["1F600","1F602","1F60D","1F60E","1F914","1F644","1F62D","1F621","1F973","1F97A","1F480","1F4A9","1F525","2764","1F44D","1F44E","1F44C","1F64F","1F4AA","1F440","1F389","1F680","26A1","1F31A","1F31D","1F63B","1F63C","1F998","1F984","1F37F"];
 
@@ -116,6 +125,7 @@ function viewOf(chat) {
   } else {
     v.title = chat.title;
     v.avatarColor = chat.avatarColor || 0;
+    v.photo = chat.avatar || null;
   }
   return v;
 }
@@ -299,6 +309,21 @@ function showMessenger() {
   subscribeChats();
   startPresence();
   maybeJoinInvite();
+  initWebPush();
+}
+
+// Веб-пуши: включаются, когда в firebase-config.js задан VAPID_KEY
+async function initWebPush() {
+  try {
+    if (!window.VAPID_KEY || window.USE_EMULATORS) return;
+    if (!("serviceWorker" in navigator) || !("Notification" in window)) return;
+    const perm = await Notification.requestPermission();
+    if (perm !== "granted") return;
+    const reg = await navigator.serviceWorker.register("/firebase-messaging-sw.js");
+    const messaging = getMessaging(fbApp);
+    const tok = await getToken(messaging, { vapidKey: window.VAPID_KEY, serviceWorkerRegistration: reg });
+    if (tok) await updateDoc(doc(dbf, "users", me.uid), { fcmTokens: arrayUnion(tok) }).catch(() => {});
+  } catch { /* пуши не критичны */ }
 }
 
 // ---------- presence (heartbeat вместо WebSocket) ----------
@@ -385,6 +410,10 @@ function typingNames(chat) {
 function chatPreview(v) {
   const names = typingNames(v.raw);
   if (names.length) return v.type === "group" ? `${names.join(", ")} печатает…` : "печатает…";
+  if (v.id !== currentChatId) {
+    const draft = localStorage.getItem(`draft_${v.id}`);
+    if (draft) return `Черновик: ${draft}`;
+  }
   const m = v.lastMessage;
   if (!m) return "Нет сообщений";
   const prefix = m.senderUid === me.uid ? "Вы: " : (v.type === "group" ? `${m.senderName}: ` : "");
@@ -445,9 +474,17 @@ function applyComposerState() {
 async function openChat(chatId) {
   const chat = chats.get(chatId);
   if (!chat) return;
+  // сохранить черновик предыдущего чата
+  if (currentChatId && currentChatId !== chatId) {
+    const prev = messageInput.value.trim();
+    if (prev) localStorage.setItem(`draft_${currentChatId}`, prev);
+    else localStorage.removeItem(`draft_${currentChatId}`);
+  }
   currentChatId = chatId;
   currentTopic = null;
   replyTarget = null; editTarget = null;
+  messageInput.value = localStorage.getItem(`draft_${chatId}`) || "";
+  autoGrow(messageInput);
   $("#replyBar").classList.add("hidden");
   $("#backButton").classList.remove("force");
   $("#conversationPlaceholder").classList.add("hidden");
@@ -567,7 +604,9 @@ $("#unpinButton").addEventListener("click", () => {
   if (currentChatId) updateDoc(doc(dbf, "chats", currentChatId), { pinnedMessageId: deleteField() }).catch(e => toast(ruError(e)));
 });
 function markRead(chatId) {
-  updateDoc(doc(dbf, "chats", chatId), { [`lastRead.${me.uid}`]: Date.now(), [`unread.${me.uid}`]: 0 }).catch(() => {});
+  updateDoc(doc(dbf, "chats", chatId), { [`lastRead.${me.uid}`]: Date.now(), [`unread.${me.uid}`]: 0 })
+    .then(() => bumpChat(chatId)) // чтобы галочки «прочитано» долетали мгновенно
+    .catch(() => {});
 }
 
 // ---------- topics ----------
@@ -681,6 +720,59 @@ function showTopicContextMenu(point, topic) {
   }));
 }
 
+// ---------- опросы ----------
+function renderPollHtml(message) {
+  const p = message.poll;
+  const votes = p.votes || {};
+  const total = Object.keys(votes).length;
+  const myVote = votes[me.uid];
+  const rows = (p.options || []).map(o => {
+    const cnt = Object.values(votes).filter(v => v === o.id).length;
+    const pct = total ? Math.round(cnt / total * 100) : 0;
+    return `<button type="button" class="poll-option${myVote === o.id ? " voted" : ""}" data-opt="${escapeHtml(o.id)}">
+      <span class="poll-bar" style="width:${pct}%"></span>
+      <span class="poll-label">${escapeHtml(o.text)}</span>
+      <span class="poll-pct">${total ? pct + "%" : ""}</span>
+    </button>`;
+  }).join("");
+  return `<div class="poll" data-message-id="${escapeHtml(message.id)}">
+    <div class="poll-q">📊 ${escapeHtml(p.question)}</div>${rows}
+    <div class="poll-total">${total ? "Голосов: " + total : "Будьте первым — голосуйте!"}</div>
+  </div>`;
+}
+async function votePoll(message, optionId) {
+  const cur = message.poll?.votes?.[me.uid];
+  const patch = { [`poll.votes.${me.uid}`]: cur === optionId ? deleteField() : optionId };
+  try { await updateDoc(doc(dbf, "chats", currentChatId, "messages", message.id), patch); bumpChat(currentChatId); }
+  catch (error) { toast(ruError(error)); }
+}
+function openCreatePollModal() {
+  const chat = currentChat();
+  if (!chat || (isForum(chat) && !currentTopic)) return toast("Откройте чат или топик");
+  let optCount = 2;
+  const optInput = (i) => `<label class="field"><span>Вариант ${i + 1}</span><input class="poll-opt-input" maxlength="60" /></label>`;
+  openModal(`<h3>Новый опрос</h3>
+    <label class="field"><span>Вопрос</span><input id="pollQuestion" maxlength="120" placeholder="О чём спросим?" /></label>
+    <div id="pollOpts">${optInput(0)}${optInput(1)}</div>
+    <button type="button" class="settings-row" id="addPollOpt"><span class="row-icon">＋</span><span>Добавить вариант</span></button>
+    <div class="modal-actions"><button class="cancel">Отмена</button><button class="confirm">Создать</button></div>`);
+  $("#addPollOpt").addEventListener("click", () => {
+    if (optCount >= 8) return;
+    $("#pollOpts").insertAdjacentHTML("beforeend", optInput(optCount++));
+  });
+  $("#modal .cancel").addEventListener("click", closeModal);
+  $("#modal .confirm").addEventListener("click", async () => {
+    const question = $("#pollQuestion").value.trim().slice(0, 120);
+    const options = [...document.querySelectorAll(".poll-opt-input")]
+      .map(i => i.value.trim().slice(0, 60)).filter(Boolean)
+      .map(text => ({ id: randomId(8), text }));
+    if (!question) return toast("Введите вопрос");
+    if (options.length < 2) return toast("Нужно минимум 2 варианта");
+    try { await sendMessage({ poll: { question, options, votes: {} } }); closeModal(); }
+    catch (error) { toast(ruError(error)); }
+  });
+}
+
 // ---------- messages: отрисовка ----------
 const TICK_ONE = '<svg viewBox="0 0 18 12" width="17" height="12"><path d="M2 6.5 6 10.5 14.5 1.5" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"/></svg>';
 const TICK_TWO = '<svg viewBox="0 0 24 12" width="21" height="12"><path d="M2 6.5 6 10.5 14.5 1.5" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"/><path d="M11.5 9 13 10.5 21.5 1.5" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"/></svg>';
@@ -716,6 +808,7 @@ function buildMessageNode(message) {
     ${message.image ? `<img class="photo" src="${escapeHtml(message.image)}" alt="Фото" loading="lazy" />` : ""}
     ${message.sticker ? `<img class="sticker-msg" src="/stickers/${escapeHtml(message.sticker)}.png" alt="Стикер" loading="lazy" />` : ""}
     ${message.voice ? `<span class="voice-wrap"><audio class="voice-msg" controls preload="metadata" src="${escapeHtml(message.voice.data)}"></audio><small class="voice-len">${message.voice.duration || 0} сек</small></span>` : ""}
+    ${message.poll ? renderPollHtml(message) : ""}
     <span class="msg-text">${formatMessageText(message.text || "")}</span>
     <span class="meta"><span class="edited">${message.editedAt ? "изм. " : ""}</span>${formatTime(message.createdAt)} ${ticksFor(message)}</span>
     <div class="reactions"></div>
@@ -769,7 +862,7 @@ messageInput.addEventListener("input", () => {
 messageInput.addEventListener("keydown", (e) => {
   if (e.key === "Enter" && !e.shiftKey && !("ontouchstart" in window)) { e.preventDefault(); $("#messageForm").requestSubmit(); }
 });
-async function sendMessage({ text = "", image = null, sticker = null, voice = null, toChatId = null, forwardedFrom = null }) {
+async function sendMessage({ text = "", image = null, sticker = null, voice = null, poll = null, toChatId = null, forwardedFrom = null }) {
   const chatId = toChatId || currentChatId;
   const chat = chats.get(chatId);
   if (!chat) return;
@@ -780,10 +873,11 @@ async function sendMessage({ text = "", image = null, sticker = null, voice = nu
   };
   if (sticker) message.sticker = sticker;
   if (voice) message.voice = voice;
+  if (poll) message.poll = poll;
   if (forwardedFrom) message.forwardedFrom = forwardedFrom;
   if (!toChatId && replyTarget) message.replyTo = { id: replyTarget.id, sender: replyTarget.senderName, text: replyTarget.text ? replyTarget.text.slice(0, 120) : "📷 Фото" };
   const ref = doc(collection(dbf, "chats", chatId, "messages"));
-  const previewText = message.text || (sticker ? "🧩 Стикер" : voice ? "🎤 Голосовое сообщение" : "");
+  const previewText = message.text || (sticker ? "🧩 Стикер" : voice ? "🎤 Голосовое сообщение" : poll ? "📊 Опрос" : "");
   const chatPatch = {
     lastMessage: { text: previewText, senderUid: me.uid, senderName: message.senderName, createdAt: message.createdAt, hasImage: !!image },
     [`lastRead.${me.uid}`]: message.createdAt,
@@ -795,6 +889,7 @@ async function sendMessage({ text = "", image = null, sticker = null, voice = nu
   batch.set(ref, message);
   batch.update(doc(dbf, "chats", chatId), chatPatch);
   await batch.commit();
+  bumpChat(chatId);
 }
 let sendBusy = false; // защита от спама по кнопке отправки
 $("#messageForm").addEventListener("submit", async (event) => {
@@ -807,6 +902,7 @@ $("#messageForm").addEventListener("submit", async (event) => {
   sendBusy = true;
   // очищаем поле сразу — повторный тап не отправит то же самое
   messageInput.value = ""; autoGrow(messageInput);
+  localStorage.removeItem(`draft_${currentChatId}`);
   try {
     if (editTarget) {
       await updateDoc(doc(dbf, "chats", currentChatId, "messages", editTarget.id), { text: text.slice(0, 4000), editedAt: Date.now() });
@@ -1009,6 +1105,7 @@ function showChatContextMenu(point, v) {
     <button data-act="pin">${v.pinned ? "📌 Открепить" : "📌 Закрепить"}</button>
     <button data-act="mute">${v.muted ? "🔔 Включить звук" : "🔇 Без звука"}</button>
     <button data-act="read">✓ Прочитано</button>
+    <button data-act="poll">📊 Создать опрос</button>
     ${v.type === "group" ? '<button data-act="topic"># Создать топик</button>' : ""}
     <button data-act="clear">🧹 Очистить историю</button>
     ${v.type !== "saved" ? `<button data-act="delete" class="danger">🗑 ${v.type === "group" || v.type === "channel" ? "Покинуть/удалить" : "Удалить чат"}</button>` : ""}
@@ -1022,6 +1119,7 @@ function showChatContextMenu(point, v) {
       else if (act === "mute") await updateDoc(ref, { muted: v.muted ? arrayRemove(me.uid) : arrayUnion(me.uid) });
       else if (act === "read") markRead(v.id);
       else if (act === "topic") { if (currentChatId !== v.id) await openChat(v.id); openCreateTopicModal(); }
+      else if (act === "poll") { if (currentChatId !== v.id) await openChat(v.id); openCreatePollModal(); }
       else if (act === "clear") {
         openConfirm(`Очистить историю «${v.title}»? Удалятся сообщения, которые вы вправе удалять.`, async () => {
           const snap = await getDocs(query(collection(dbf, "chats", v.id, "messages"), limit(400)));
@@ -1204,7 +1302,14 @@ async function openDmByUsername(name) {
 }
 $("#messages").addEventListener("click", (e) => {
   const mention = e.target.closest(".mention");
-  if (mention) { e.stopPropagation(); openDmByUsername(mention.dataset.user); }
+  if (mention) { e.stopPropagation(); openDmByUsername(mention.dataset.user); return; }
+  const opt = e.target.closest(".poll-option");
+  if (opt) {
+    e.stopPropagation();
+    const node = opt.closest("[data-message-id]")?.closest(".message") || opt.closest(".message");
+    const msg = node?._message;
+    if (msg) votePoll(msg, opt.dataset.opt);
+  }
 });
 $("#newChatFab").addEventListener("click", () => { $("#newChatPanel").classList.remove("hidden"); $("#userSearch").focus(); });
 $("#closeNewChat").addEventListener("click", () => $("#newChatPanel").classList.add("hidden"));
@@ -1296,8 +1401,9 @@ async function openChatInfo() {
     const roleOf = (uid) => uid === chat.ownerUid ? "owner" : ((chat.admins || []).includes(uid) ? "admin" : "member");
     const roleMark = { owner: " 👑", admin: " ⭐", member: "" };
     body.innerHTML = `
-      <div class="settings-profile"><div class="avatar large" data-color="${v.avatarColor}">${escapeHtml(v.title[0].toUpperCase())}</div>
+      <div class="settings-profile">${avatarHtml(v.avatarColor, (v.title || "?")[0].toUpperCase(), v.photo, "avatar large")}
       <h3>${escapeHtml(v.title)}</h3><p class="muted">${v.memberCount} участник(ов)</p></div>
+      ${iAmAdmin ? '<button class="settings-row" id="editGroupButton"><span class="row-icon">✎</span><span>Название и фото</span></button>' : ""}
       <button class="settings-row" id="addMemberButton"><span class="row-icon">＋</span><span>Добавить участника</span></button>
       ${iAmAdmin ? '<button class="settings-row" id="inviteLinkButton"><span class="row-icon">🔗</span><span>Ссылка приглашения</span></button>' : ""}
       <div class="search-section-title">Участники</div><div id="memberList"></div>`;
@@ -1326,6 +1432,34 @@ async function openChatInfo() {
       });
     });
     body.querySelector("#inviteLinkButton")?.addEventListener("click", openInviteLinkModal);
+    body.querySelector("#editGroupButton")?.addEventListener("click", () => {
+      openModal(`<h3>Настройки ${chat.type === "channel" ? "канала" : "группы"}</h3>
+        <label class="field"><span>Название</span><input id="editGroupTitle" maxlength="60" value="${escapeHtml(chat.title || "")}" /></label>
+        <button type="button" class="settings-row" id="pickGroupPhoto"><span class="row-icon">🖼</span><span>Выбрать фото</span></button>
+        <div class="modal-actions"><button class="cancel">Отмена</button><button class="confirm">Сохранить</button></div>`);
+      let newPhoto = null;
+      $("#pickGroupPhoto").addEventListener("click", () => {
+        const input = document.createElement("input");
+        input.type = "file"; input.accept = "image/*";
+        input.addEventListener("change", async () => {
+          if (!input.files[0]) return;
+          newPhoto = await compressImage(input.files[0], 128, 0.8);
+          if (newPhoto && newPhoto.length > 60_000) newPhoto = await compressImage(input.files[0], 96, 0.6);
+          toast(newPhoto ? "Фото выбрано" : "Не удалось обработать фото");
+        });
+        input.click();
+      });
+      $("#modal .cancel").addEventListener("click", closeModal);
+      $("#modal .confirm").addEventListener("click", async () => {
+        try {
+          const patch = { title: $("#editGroupTitle").value.trim().slice(0, 60) || chat.title };
+          if (newPhoto) patch.avatar = newPhoto;
+          await updateDoc(doc(dbf, "chats", chat.id), patch);
+          bumpChat(chat.id);
+          closeModal(); openChatInfo(); toast("Сохранено");
+        } catch (error) { toast(ruError(error)); }
+      });
+    });
   } else if (v.type === "private" && v.peer) {
     const peer = v.peer;
     const blocked = (myPrefs.blocked || []).includes(peer.uid);

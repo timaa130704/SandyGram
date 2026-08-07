@@ -1,0 +1,938 @@
+// SandyGram Desktop — нативный Windows-клиент (WPF), общий Firebase с сайтом и приложением
+using System;
+using System.Collections.Generic;
+using System.IO;
+using System.Linq;
+using System.Text.Json;
+using System.Text.Json.Nodes;
+using System.Threading.Tasks;
+using System.Windows;
+using System.Windows.Controls;
+using System.Windows.Input;
+using System.Windows.Media;
+using System.Windows.Media.Imaging;
+using System.Windows.Threading;
+
+namespace SandyGram;
+
+public partial class MainWindow : Window
+{
+    const string Site = "https://sandygram-a3b42.web.app";
+    static readonly string[] AvatarTones = { "#2B2B2B", "#3A3A3A", "#4A4A4A", "#5A5A5A", "#6B6B6B", "#7D7D7D", "#909090" };
+    static readonly string SessionFile = Path.Combine(
+        Environment.GetFolderPath(Environment.SpecialFolder.ApplicationData), "SandyGram", "session.json");
+
+    string myUsername = "", myDisplayName = "";
+    readonly Dictionary<string, JsonNode> chats = new();          // chatId -> fields
+    readonly Dictionary<string, JsonNode> userCache = new();      // uid -> fields
+    readonly Dictionary<string, DateTime> userCacheAt = new();
+    string currentChatId = "";
+    string lastMsgSignature = "";
+    string lastListSignature = "";
+    readonly List<(string Id, JsonNode Fields)> loadedMsgs = new(); // сообщения открытого чата (локальный кеш)
+    long lastMaxCreated = 0;                                        // для дельта-запросов
+    long lastTicksMark = 0;
+    bool sending = false;
+    string searchFilter = "";
+    readonly Dictionary<string, string> drafts = new();
+    DispatcherTimer? chatsTimer, msgsTimer, presenceTimer;
+    System.Threading.CancellationTokenSource? sseCts;
+    const string Rtdb = "https://sandygram-a3b42-default-rtdb.europe-west1.firebasedatabase.app";
+
+    [System.Runtime.InteropServices.DllImport("dwmapi.dll")]
+    static extern int DwmSetWindowAttribute(IntPtr hwnd, int attr, ref int value, int size);
+
+    public MainWindow()
+    {
+        InitializeComponent();
+        // тёмный заголовок окна (Windows 10 1809+)
+        SourceInitialized += (_, _) =>
+        {
+            var hwnd = new System.Windows.Interop.WindowInteropHelper(this).Handle;
+            int dark = 1;
+            DwmSetWindowAttribute(hwnd, 20, ref dark, sizeof(int));
+        };
+        Loaded += async (_, _) => await TryRestoreSessionAsync();
+    }
+
+    // ================================================================ auth
+    static string EmailFor(string u) => $"{u}@sandygram.app";
+
+    async Task TryRestoreSessionAsync()
+    {
+        try
+        {
+            if (!File.Exists(SessionFile)) return;
+            var s = JsonNode.Parse(File.ReadAllText(SessionFile))!;
+            Fire.RefreshToken = s["refreshToken"]?.GetValue<string>() ?? "";
+            if (string.IsNullOrEmpty(Fire.RefreshToken)) return;
+            await Fire.EnsureTokenAsync();
+            await AfterLoginAsync();
+        }
+        catch { /* остаёмся на экране входа */ }
+    }
+
+    void SaveSession()
+    {
+        Directory.CreateDirectory(Path.GetDirectoryName(SessionFile)!);
+        File.WriteAllText(SessionFile, JsonSerializer.Serialize(new { refreshToken = Fire.RefreshToken }));
+    }
+
+    async void LoginBtn_Click(object sender, RoutedEventArgs e) => await AuthFlowAsync(register: false);
+    async void RegisterBtn_Click(object sender, RoutedEventArgs e) => await AuthFlowAsync(register: true);
+
+    async Task AuthFlowAsync(bool register)
+    {
+        var name = LoginUser.Text.Trim().ToLowerInvariant().TrimStart('@');
+        var pass = LoginPass.Password;
+        AuthError.Text = "";
+        if (!System.Text.RegularExpressions.Regex.IsMatch(name, "^[a-z0-9_]{3,24}$")) { AuthError.Text = "Имя: 3–24 символа, латиница, цифры и _"; return; }
+        if (pass.Length < 6) { AuthError.Text = "Пароль: минимум 6 символов"; return; }
+        LoginBtn.IsEnabled = RegisterBtn.IsEnabled = false;
+        try
+        {
+            var reg = await Fire.AuthNoThrowGetUsernameDoc(name);
+            var email = reg?["fields"]?["email"] != null ? Fire.FStr(reg["fields"]!, "email") : EmailFor(name);
+            if (register)
+            {
+                if (reg != null)
+                {
+                    // имя занято — возможно, наша оборванная регистрация: пробуем войти
+                    try { await Fire.SignInAsync(email, pass); }
+                    catch { throw new FireException("EMAIL_EXISTS"); }
+                }
+                else
+                {
+                    try { await Fire.SignUpAsync(EmailFor(name), pass); }
+                    catch (FireException ex) when (ex.Message.Contains("EMAIL_EXISTS")) { await Fire.SignInAsync(EmailFor(name), pass); }
+                }
+                await EnsureProfileAsync(name);
+            }
+            else
+            {
+                await Fire.SignInAsync(email, pass);
+                await EnsureProfileAsync(name); // самопочинка оборванной регистрации
+            }
+            SaveSession();
+            await AfterLoginAsync();
+        }
+        catch (FireException ex) { AuthError.Text = ex.Ru; }
+        catch (Exception ex) { AuthError.Text = ex.Message; }
+        finally { LoginBtn.IsEnabled = RegisterBtn.IsEnabled = true; }
+    }
+
+    async Task EnsureProfileAsync(string name)
+    {
+        var prof = await Fire.GetDocAsync($"users/{Fire.Uid}");
+        if (prof == null)
+        {
+            await Fire.SetDocAsync($"users/{Fire.Uid}", new()
+            {
+                ["username"] = name, ["displayName"] = name, ["bio"] = "",
+                ["avatarColor"] = (long)Random.Shared.Next(7),
+                ["createdAt"] = DateTimeOffset.UtcNow.ToUnixTimeMilliseconds(),
+                ["lastSeen"] = DateTimeOffset.UtcNow.ToUnixTimeMilliseconds(),
+            });
+        }
+        var unameDoc = await Fire.GetDocAsync($"usernames/{name}");
+        if (unameDoc == null)
+            await Fire.SetDocAsync($"usernames/{name}", new() { ["uid"] = Fire.Uid, ["email"] = EmailFor(name) });
+        var saved = await Fire.GetDocAsync($"chats/saved_{Fire.Uid}");
+        if (saved == null)
+            await Fire.SetDocAsync($"chats/saved_{Fire.Uid}", new()
+            {
+                ["type"] = "saved",
+                ["members"] = new List<object?> { Fire.Uid },
+                ["createdAt"] = DateTimeOffset.UtcNow.ToUnixTimeMilliseconds(),
+                ["lastRead"] = new Dictionary<string, object?>(),
+                ["unread"] = new Dictionary<string, object?>(),
+                ["pinnedBy"] = new List<object?>(),
+                ["muted"] = new List<object?>(),
+            });
+    }
+
+    async Task AfterLoginAsync()
+    {
+        var prof = await Fire.GetDocAsync($"users/{Fire.Uid}");
+        if (prof?["fields"] == null) { AuthError.Text = "Профиль не найден — зарегистрируйтесь заново."; return; }
+        myUsername = Fire.FStr(prof["fields"]!, "username");
+        myDisplayName = Fire.FStr(prof["fields"]!, "displayName");
+        MyName.Text = myDisplayName;
+        MyHandle.Text = $"@{myUsername}";
+        var myTone = AvatarTones[Math.Abs((int)Fire.FLong(prof["fields"]!, "avatarColor")) % 7];
+        var myPhoto = Fire.FStr(prof["fields"]!, "avatar");
+        MyAvatar.Content = MakeAvatar(myDisplayName.Length > 0 ? myDisplayName[..1].ToUpper() : "S", myTone, myPhoto.Length > 0 ? myPhoto : null, 40);
+        AuthPanel.Visibility = Visibility.Collapsed;
+        MainPanel.Visibility = Visibility.Visible;
+
+        // Realtime через сигнальную шину RTDB (одно живое соединение, чтения Firestore — только по факту событий)
+        StartBumpListener();
+        chatsTimer = StartTimer(90, async () => { if (IsActive) await PollChatsAsync(); }); // редкая страховка
+        presenceTimer = StartTimer(45, async () => { if (IsActive) await HeartbeatAsync(); });
+        await HeartbeatAsync();
+        await PollChatsAsync();
+    }
+
+    // ---------- вход через Google (браузер + локальный колбэк) ----------
+    string pendingEmail = "", pendingName = "", pendingPhoto = "";
+
+    async void GoogleBtn_Click(object sender, RoutedEventArgs e)
+    {
+        AuthError.Text = "";
+        GoogleBtn.IsEnabled = false;
+        System.Net.HttpListener? listener = null;
+        try
+        {
+            var port = GetFreePort();
+            listener = new System.Net.HttpListener();
+            listener.Prefixes.Add($"http://127.0.0.1:{port}/");
+            listener.Start();
+            System.Diagnostics.Process.Start(new System.Diagnostics.ProcessStartInfo($"{Site}/desktop-auth.html?port={port}") { UseShellExecute = true });
+            AuthError.Text = "Ожидаю вход в браузере…";
+
+            var receive = Task.Run(async () =>
+            {
+                while (true)
+                {
+                    var ctx = await listener.GetContextAsync();
+                    if (ctx.Request.HttpMethod == "POST" && ctx.Request.Url!.AbsolutePath == "/callback")
+                    {
+                        string body;
+                        using (var r = new StreamReader(ctx.Request.InputStream)) body = await r.ReadToEndAsync();
+                        ctx.Response.AddHeader("Access-Control-Allow-Origin", "*");
+                        var ok = System.Text.Encoding.UTF8.GetBytes("ok");
+                        await ctx.Response.OutputStream.WriteAsync(ok);
+                        ctx.Response.Close();
+                        return body;
+                    }
+                    ctx.Response.StatusCode = 404;
+                    ctx.Response.Close();
+                }
+            });
+            var done = await Task.WhenAny(receive, Task.Delay(TimeSpan.FromMinutes(3)));
+            if (done != receive) throw new Exception("Время ожидания входа истекло — попробуйте ещё раз.");
+            var j = JsonNode.Parse(await receive)!;
+
+            Fire.RefreshToken = j["refreshToken"]!.GetValue<string>();
+            await Fire.EnsureTokenAsync();
+            AuthError.Text = "";
+
+            var prof = await Fire.GetDocAsync($"users/{Fire.Uid}");
+            if (prof == null)
+            {
+                // первый вход через Google — выбираем @username
+                pendingEmail = j["email"]?.GetValue<string>() ?? "";
+                pendingName = j["displayName"]?.GetValue<string>() ?? "";
+                pendingPhoto = j["photoURL"]?.GetValue<string>() ?? "";
+                var suggest = new string((pendingEmail.Split('@')[0].ToLowerInvariant()).Where(c => char.IsAsciiLetterOrDigit(c) || c == '_').ToArray());
+                PickName.Text = suggest.Length >= 3 ? suggest : "user" + Random.Shared.Next(1000, 9999);
+                AuthPanel.Visibility = Visibility.Collapsed;
+                PickPanel.Visibility = Visibility.Visible;
+                return;
+            }
+            SaveSession();
+            await AfterLoginAsync();
+        }
+        catch (FireException ex) { AuthError.Text = ex.Ru; }
+        catch (Exception ex) { AuthError.Text = ex.Message; }
+        finally { GoogleBtn.IsEnabled = true; try { listener?.Stop(); } catch { } }
+    }
+
+    static int GetFreePort()
+    {
+        var l = new System.Net.Sockets.TcpListener(System.Net.IPAddress.Loopback, 0);
+        l.Start();
+        var port = ((System.Net.IPEndPoint)l.LocalEndpoint).Port;
+        l.Stop();
+        return port;
+    }
+
+    async void PickBtn_Click(object sender, RoutedEventArgs e)
+    {
+        var name = PickName.Text.Trim().ToLowerInvariant().TrimStart('@');
+        PickError.Text = "";
+        if (!System.Text.RegularExpressions.Regex.IsMatch(name, "^[a-z0-9_]{3,24}$")) { PickError.Text = "3–24 символа: латиница, цифры и _"; return; }
+        PickBtn.IsEnabled = false;
+        try
+        {
+            var taken = await Fire.GetDocAsync($"usernames/{name}");
+            if (taken?["fields"] != null && Fire.FStr(taken["fields"]!, "uid") != Fire.Uid) { PickError.Text = "Это имя уже занято."; return; }
+            if (taken == null)
+                await Fire.SetDocAsync($"usernames/{name}", new() { ["uid"] = Fire.Uid, ["email"] = pendingEmail.Length > 0 ? pendingEmail : EmailFor(name), ["google"] = true });
+            var fields = new Dictionary<string, object?>
+            {
+                ["username"] = name,
+                ["displayName"] = pendingName.Length > 0 ? (pendingName.Length > 40 ? pendingName[..40] : pendingName) : name,
+                ["bio"] = "",
+                ["avatarColor"] = (long)Random.Shared.Next(7),
+                ["createdAt"] = DateTimeOffset.UtcNow.ToUnixTimeMilliseconds(),
+                ["lastSeen"] = DateTimeOffset.UtcNow.ToUnixTimeMilliseconds(),
+            };
+            if (pendingPhoto.Length > 0) fields["avatar"] = pendingPhoto;
+            await Fire.SetDocAsync($"users/{Fire.Uid}", fields);
+            var saved = await Fire.GetDocAsync($"chats/saved_{Fire.Uid}");
+            if (saved == null)
+                await Fire.SetDocAsync($"chats/saved_{Fire.Uid}", new()
+                {
+                    ["type"] = "saved", ["members"] = new List<object?> { Fire.Uid },
+                    ["createdAt"] = DateTimeOffset.UtcNow.ToUnixTimeMilliseconds(),
+                    ["lastRead"] = new Dictionary<string, object?>(), ["unread"] = new Dictionary<string, object?>(),
+                    ["pinnedBy"] = new List<object?>(), ["muted"] = new List<object?>(),
+                });
+            SaveSession();
+            PickPanel.Visibility = Visibility.Collapsed;
+            await AfterLoginAsync();
+        }
+        catch (FireException ex) { PickError.Text = ex.Ru; }
+        catch (Exception ex) { PickError.Text = ex.Message; }
+        finally { PickBtn.IsEnabled = true; }
+    }
+
+    void SearchBox_Changed(object sender, TextChangedEventArgs e)
+    {
+        searchFilter = SearchBox.Text.Trim().ToLowerInvariant();
+        lastListSignature = "";
+        _ = RenderChatListAsync();
+    }
+
+    void LogoutBtn_Click(object sender, RoutedEventArgs e)
+    {
+        sseCts?.Cancel();
+        chatsTimer?.Stop(); msgsTimer?.Stop(); presenceTimer?.Stop();
+        Fire.IdToken = Fire.RefreshToken = Fire.Uid = "";
+        try { File.Delete(SessionFile); } catch { }
+        chats.Clear(); currentChatId = ""; lastMsgSignature = lastListSignature = "";
+        loadedMsgs.Clear();
+        ChatList.Children.Clear(); MsgList.Children.Clear();
+        ChatHeader.Visibility = Visibility.Collapsed;
+        Composer.Visibility = Visibility.Collapsed;
+        EmptyState.Visibility = Visibility.Visible;
+        MainPanel.Visibility = Visibility.Collapsed;
+        AuthPanel.Visibility = Visibility.Visible;
+    }
+
+    DispatcherTimer StartTimer(double seconds, Func<Task> tick)
+    {
+        var t = new DispatcherTimer { Interval = TimeSpan.FromSeconds(seconds) };
+        bool busy = false;
+        t.Tick += async (_, _) => { if (busy) return; busy = true; try { await tick(); } catch { } finally { busy = false; } };
+        t.Start();
+        return t;
+    }
+
+    async Task HeartbeatAsync()
+    {
+        if (string.IsNullOrEmpty(Fire.Uid)) return;
+        await Fire.PatchDocAsync($"users/{Fire.Uid}", new() { ["lastSeen"] = DateTimeOffset.UtcNow.ToUnixTimeMilliseconds() });
+    }
+
+    // ---------- сигнальная шина RTDB: слушаем /bump стримом ----------
+    void StartBumpListener()
+    {
+        sseCts?.Cancel();
+        sseCts = new System.Threading.CancellationTokenSource();
+        var ct = sseCts.Token;
+        _ = Task.Run(async () =>
+        {
+            while (!ct.IsCancellationRequested)
+            {
+                try
+                {
+                    await Fire.EnsureTokenAsync();
+                    using var http = new System.Net.Http.HttpClient { Timeout = System.Threading.Timeout.InfiniteTimeSpan };
+                    using var req = new System.Net.Http.HttpRequestMessage(System.Net.Http.HttpMethod.Get, $"{Rtdb}/bump.json?auth={Fire.IdToken}");
+                    req.Headers.Add("Accept", "text/event-stream");
+                    using var resp = await http.SendAsync(req, System.Net.Http.HttpCompletionOption.ResponseHeadersRead, ct);
+                    using var stream = await resp.Content.ReadAsStreamAsync(ct);
+                    using var reader = new StreamReader(stream);
+                    string evt = "";
+                    while (!ct.IsCancellationRequested)
+                    {
+                        var line = await reader.ReadLineAsync(ct);
+                        if (line == null) break;
+                        if (line.StartsWith("event:")) evt = line[6..].Trim();
+                        else if (line.StartsWith("data:") && (evt == "put" || evt == "patch"))
+                        {
+                            var payload = line[5..].Trim();
+                            if (payload == "null") continue;
+                            var data = JsonNode.Parse(payload);
+                            var path = data?["path"]?.GetValue<string>() ?? "/";
+                            var chatId = path.Trim('/');
+                            if (chatId.Length > 0 && !chatId.Contains('/'))
+                                await Dispatcher.InvokeAsync(() => _ = OnBumpAsync(chatId));
+                        }
+                        else if (evt == "auth_revoked") break; // токен истёк — переподключаемся с новым
+                    }
+                }
+                catch { }
+                try { await Task.Delay(3000, ct); } catch { break; }
+            }
+        }, ct);
+    }
+
+    async Task OnBumpAsync(string chatId)
+    {
+        try
+        {
+            if (chatId == currentChatId) await PollMessagesAsync(); // дельта: только новые
+            // обновляем одну строку списка (1 чтение), а не весь список
+            var doc = await Fire.GetDocAsync($"chats/{chatId}");
+            if (doc?["fields"] != null)
+            {
+                chats[chatId] = doc["fields"]!;
+                lastListSignature = "";
+                await RenderChatListAsync();
+                if (chatId == currentChatId && loadedMsgs.Count > 0)
+                {
+                    long lro = 0;
+                    foreach (var kv in Fire.FMap(doc["fields"]!, "lastRead"))
+                        if (kv.Key != Fire.Uid && kv.Value is long lr && lr > lro) lro = lr;
+                    if (lro != lastTicksMark) RenderMessages(); // галочки «прочитано»
+                }
+            }
+        }
+        catch { }
+    }
+
+    // ================================================================ чаты
+    async Task PollChatsAsync()
+    {
+        var rows = await Fire.RunQueryAsync(new
+        {
+            from = new[] { new { collectionId = "chats" } },
+            where = new { fieldFilter = new { field = new { fieldPath = "members" }, op = "ARRAY_CONTAINS", value = new { stringValue = Fire.Uid } } },
+            limit = 100,
+        });
+        chats.Clear();
+        foreach (var (id, fields) in rows) chats[id] = fields;
+        await RenderChatListAsync();
+        if (!string.IsNullOrEmpty(currentChatId) && chats.TryGetValue(currentChatId, out var cf))
+        {
+            long lro = 0;
+            foreach (var kv in Fire.FMap(cf, "lastRead"))
+                if (kv.Key != Fire.Uid && kv.Value is long lr && lr > lro) lro = lr;
+            if (lro != lastTicksMark && loadedMsgs.Count > 0) RenderMessages();
+        }
+    }
+
+    async Task<JsonNode?> GetUserCachedAsync(string uid)
+    {
+        if (userCache.TryGetValue(uid, out var u) && userCacheAt.TryGetValue(uid, out var at) && (DateTime.UtcNow - at).TotalSeconds < 30)
+            return u;
+        var doc = await Fire.GetDocAsync($"users/{uid}");
+        if (doc?["fields"] != null) { userCache[uid] = doc["fields"]!; userCacheAt[uid] = DateTime.UtcNow; return doc["fields"]; }
+        return userCache.TryGetValue(uid, out var stale) ? stale : null;
+    }
+
+    async Task<(string Title, string AvatarLetter, string Tone, string? Photo, string Sub)> ChatViewAsync(string id, JsonNode f)
+    {
+        var type = Fire.FStr(f, "type");
+        if (type == "saved") return ("Избранное", "☆", "#F5F5F5", null, "ваши заметки");
+        if (type == "private")
+        {
+            var peerUid = Fire.FList(f, "members").Select(m => m as string).FirstOrDefault(m => m != Fire.Uid) ?? "";
+            var peer = await GetUserCachedAsync(peerUid);
+            if (peer == null) return ("…", "?", AvatarTones[0], null, "");
+            var name = Fire.FStr(peer, "displayName");
+            var tone = AvatarTones[Math.Abs((int)Fire.FLong(peer, "avatarColor")) % 7];
+            var hide = Fire.F(peer, "hideLastSeen") as bool? ?? false;
+            var lastSeen = Fire.FLong(peer, "lastSeen");
+            var online = !hide && DateTimeOffset.UtcNow.ToUnixTimeMilliseconds() - lastSeen < 70_000;
+            var sub = hide ? "был(а) недавно" : online ? "в сети" : "был(а) недавно";
+            return (name, name.Length > 0 ? name[..1].ToUpper() : "?", tone, Fire.FStr(peer, "avatar") is { Length: > 0 } a ? a : null, sub);
+        }
+        var title = Fire.FStr(f, "title");
+        var count = Fire.FList(f, "members").Count;
+        var kind = type == "channel" ? $"📢 канал · {count} подписчик(ов)" : $"{count} участник(ов)";
+        return (title, title.Length > 0 ? title[..1].ToUpper() : "?", AvatarTones[Math.Abs((int)Fire.FLong(f, "avatarColor")) % 7], null, kind);
+    }
+
+    async Task RenderChatListAsync()
+    {
+        var ordered = chats.OrderByDescending(kv =>
+        {
+            var lm = Fire.FMap(kv.Value, "lastMessage");
+            return lm.TryGetValue("createdAt", out var c) && c is long l ? l : Fire.FLong(kv.Value, "createdAt");
+        }).ToList();
+
+        var sig = string.Join("|", ordered.Select(kv =>
+        {
+            var lm = Fire.FMap(kv.Value, "lastMessage");
+            var unread = Fire.FMap(kv.Value, "unread").TryGetValue(Fire.Uid, out var u) && u is long ul ? ul : 0;
+            return $"{kv.Key}:{(lm.TryGetValue("createdAt", out var c) ? c : 0)}:{(lm.TryGetValue("text", out var t) ? t : "")}:{unread}:{kv.Key == currentChatId}";
+        }));
+        if (sig == lastListSignature) return;
+        lastListSignature = sig;
+
+        ChatList.Children.Clear();
+        foreach (var (id, f) in ordered)
+        {
+            var (title, letter, tone, photo, _) = await ChatViewAsync(id, f);
+            if (searchFilter.Length > 0 && !title.ToLowerInvariant().Contains(searchFilter)) continue;
+            var lm = Fire.FMap(f, "lastMessage");
+            var preview = lm.TryGetValue("text", out var pt) && pt is string ps && ps.Length > 0 ? ps
+                : lm.TryGetValue("hasImage", out var hi) && hi is bool hb && hb ? "📷 Фото" : "Нет сообщений";
+            var unread = Fire.FMap(f, "unread").TryGetValue(Fire.Uid, out var un) && un is long unl ? unl : 0;
+
+            var row = new Border
+            {
+                Style = (Style)FindResource("ChatRow"),
+                Padding = new Thickness(10, 9, 10, 9),
+                Margin = new Thickness(0, 1, 0, 1),
+            };
+            if (id == currentChatId) row.Background = (Brush)FindResource("Surface3");
+            var g = new Grid();
+            g.ColumnDefinitions.Add(new ColumnDefinition { Width = GridLength.Auto });
+            g.ColumnDefinitions.Add(new ColumnDefinition { Width = new GridLength(1, GridUnitType.Star) });
+            g.ColumnDefinitions.Add(new ColumnDefinition { Width = GridLength.Auto });
+
+            g.Children.Add(MakeAvatar(letter, tone, photo, 42));
+
+            var textCol = new StackPanel { Margin = new Thickness(10, 0, 6, 0), VerticalAlignment = VerticalAlignment.Center };
+            textCol.Children.Add(new TextBlock { Text = title, FontWeight = FontWeights.Bold, FontSize = 14, Foreground = (Brush)FindResource("Text"), TextTrimming = TextTrimming.CharacterEllipsis });
+            textCol.Children.Add(new TextBlock { Text = preview, FontSize = 12, Foreground = (Brush)FindResource("Muted"), TextTrimming = TextTrimming.CharacterEllipsis });
+            Grid.SetColumn(textCol, 1);
+            g.Children.Add(textCol);
+
+            if (unread > 0)
+            {
+                var badge = new Border
+                {
+                    Background = (Brush)FindResource("Inverse"), CornerRadius = new CornerRadius(99),
+                    MinWidth = 22, Height = 22, VerticalAlignment = VerticalAlignment.Center, Padding = new Thickness(6, 0, 6, 0),
+                };
+                badge.Child = new TextBlock { Text = unread.ToString(), FontSize = 11, FontWeight = FontWeights.Bold, Foreground = (Brush)FindResource("OnInverse"), HorizontalAlignment = HorizontalAlignment.Center, VerticalAlignment = VerticalAlignment.Center };
+                Grid.SetColumn(badge, 2);
+                g.Children.Add(badge);
+            }
+
+            row.Child = g;
+            var chatId = id;
+            row.MouseLeftButtonUp += async (_, _) => await OpenChatAsync(chatId);
+            ChatList.Children.Add(row);
+        }
+    }
+
+    UIElement MakeAvatar(string letter, string tone, string? photo, double size)
+    {
+        var b = new Border
+        {
+            Width = size, Height = size, CornerRadius = new CornerRadius(size / 2),
+            Background = new SolidColorBrush((Color)ColorConverter.ConvertFromString(tone)),
+            VerticalAlignment = VerticalAlignment.Center, ClipToBounds = true,
+        };
+        if (photo != null)
+        {
+            var img = TryImage(photo, size);
+            if (img != null)
+            {
+                b.Background = new ImageBrush(img) { Stretch = Stretch.UniformToFill };
+                return b;
+            }
+        }
+        b.Child = new TextBlock
+        {
+            Text = letter, FontWeight = FontWeights.Bold, FontSize = size * 0.42,
+            Foreground = tone == "#F5F5F5" ? (Brush)FindResource("OnInverse") : Brushes.White,
+            HorizontalAlignment = HorizontalAlignment.Center, VerticalAlignment = VerticalAlignment.Center,
+        };
+        return b;
+    }
+
+    static BitmapImage? TryImage(string src, double decodeSize = 0)
+    {
+        try
+        {
+            var img = new BitmapImage();
+            img.BeginInit();
+            img.CacheOption = BitmapCacheOption.OnLoad;
+            if (decodeSize > 0) img.DecodePixelWidth = (int)(decodeSize * 2);
+            if (src.StartsWith("data:"))
+            {
+                var b64 = src[(src.IndexOf(",") + 1)..];
+                img.StreamSource = new MemoryStream(Convert.FromBase64String(b64));
+            }
+            else img.UriSource = new Uri(src);
+            img.EndInit();
+            return img;
+        }
+        catch { return null; }
+    }
+
+    // ================================================================ переписка
+    async Task OpenChatAsync(string chatId)
+    {
+        if (!string.IsNullOrEmpty(currentChatId) && currentChatId != chatId)
+        {
+            if (MsgInput.Text.Trim().Length > 0) drafts[currentChatId] = MsgInput.Text;
+            else drafts.Remove(currentChatId);
+        }
+        MsgInput.Text = drafts.TryGetValue(chatId, out var d) ? d : "";
+        currentChatId = chatId;
+        lastMsgSignature = ""; lastListSignature = "";
+        loadedMsgs.Clear(); lastMaxCreated = 0;
+        MsgList.Children.Clear();
+        if (!chats.TryGetValue(chatId, out var f)) return;
+        var (title, letter, tone, photo, sub) = await ChatViewAsync(chatId, f);
+        ChatTitle.Text = title;
+        ChatSubtitle.Text = sub;
+        ChatAvatar.Content = MakeAvatar(letter, tone, photo, 42);
+        ChatHeader.Visibility = Visibility.Visible;
+        EmptyState.Visibility = Visibility.Collapsed;
+
+        // канал: пишут только админы
+        var type = Fire.FStr(f, "type");
+        var admins = Fire.FList(f, "admins").Select(a => a as string).ToList();
+        var isAdmin = Fire.FStr(f, "ownerUid") == Fire.Uid || admins.Contains(Fire.Uid);
+        Composer.Visibility = type == "channel" && !isAdmin ? Visibility.Collapsed : Visibility.Visible;
+
+        await RenderChatListAsync();
+        await PollMessagesAsync(force: true);
+        await MarkReadAsync(chatId);
+        MsgInput.Focus();
+    }
+
+    async Task MarkReadAsync(string chatId)
+    {
+        var now = DateTimeOffset.UtcNow.ToUnixTimeMilliseconds();
+        await Fire.PatchDocAsync($"chats/{chatId}", new()
+        {
+            ["lastRead"] = new Dictionary<string, object?> { [Fire.Uid] = now },
+            ["unread"] = new Dictionary<string, object?> { [Fire.Uid] = 0L },
+        }, new[] { $"lastRead.{Fire.Uid}", $"unread.{Fire.Uid}" });
+        _ = BumpAsync(chatId); // мгновенные галочки у собеседника
+    }
+
+    static async Task BumpAsync(string chatId)
+    {
+        try
+        {
+            await Fire.EnsureTokenAsync();
+            using var http = new System.Net.Http.HttpClient();
+            await http.PutAsync($"{Rtdb}/bump/{Uri.EscapeDataString(chatId)}.json?auth={Fire.IdToken}",
+                new System.Net.Http.StringContent(DateTimeOffset.UtcNow.ToUnixTimeMilliseconds().ToString()));
+        }
+        catch { }
+    }
+
+    async Task PollMessagesAsync(bool force = false)
+    {
+        if (string.IsNullOrEmpty(currentChatId)) return;
+        if (force || loadedMsgs.Count == 0)
+        {
+            // первая загрузка: последние 100 сообщений
+            var all = await QueryMessagesAsync(sinceMs: 0, limitN: 100, desc: true);
+            all.Reverse();
+            loadedMsgs.Clear();
+            loadedMsgs.AddRange(all);
+            lastMaxCreated = loadedMsgs.Count > 0 ? loadedMsgs.Max(r => Fire.FLong(r.Fields, "createdAt")) : 0;
+            RenderMessages(scrollBottom: true);
+            return;
+        }
+        // дельта: только новые сообщения (пустой ответ ≈ 1 чтение из квоты)
+        var fresh = await QueryMessagesAsync(sinceMs: lastMaxCreated, limitN: 50, desc: false);
+        if (fresh.Count == 0) return;
+        foreach (var row in fresh)
+            if (!loadedMsgs.Any(x => x.Id == row.Id)) loadedMsgs.Add(row);
+        lastMaxCreated = Math.Max(lastMaxCreated, fresh.Max(r => Fire.FLong(r.Fields, "createdAt")));
+        RenderMessages(scrollBottom: true);
+        if (fresh.Any(r => Fire.FStr(r.Fields, "sender") != Fire.Uid) && IsActive)
+            await MarkReadAsync(currentChatId);
+    }
+
+    void RenderMessages(bool scrollBottom = false)
+    {
+        long lastReadByOthers = 0;
+        var isGroup = false;
+        if (chats.TryGetValue(currentChatId, out var chatFields))
+        {
+            foreach (var kv in Fire.FMap(chatFields, "lastRead"))
+                if (kv.Key != Fire.Uid && kv.Value is long lr && lr > lastReadByOthers) lastReadByOthers = lr;
+            isGroup = Fire.FStr(chatFields, "type") is "group" or "channel";
+        }
+        lastTicksMark = lastReadByOthers;
+
+        var wasAtBottom = MsgScroll.VerticalOffset >= MsgScroll.ScrollableHeight - 60;
+        MsgList.Children.Clear();
+        string lastDay = "";
+        foreach (var (id, m) in loadedMsgs.OrderBy(r => Fire.FLong(r.Fields, "createdAt")))
+        {
+            if (Fire.F(m, "deleted") is bool d && d) continue;
+            var created = Fire.FLong(m, "createdAt");
+            var day = DateTimeOffset.FromUnixTimeMilliseconds(created).ToLocalTime().ToString("d MMMM");
+            if (day != lastDay)
+            {
+                lastDay = day;
+                var chip = new Border
+                {
+                    Background = (Brush)FindResource("Surface"), CornerRadius = new CornerRadius(11),
+                    Padding = new Thickness(12, 4, 12, 4), HorizontalAlignment = HorizontalAlignment.Center,
+                    Margin = new Thickness(0, 12, 0, 8),
+                };
+                chip.Child = new TextBlock { Text = day, Foreground = (Brush)FindResource("Muted"), FontSize = 11 };
+                MsgList.Children.Add(chip);
+            }
+            MsgList.Children.Add(BuildBubble(id, m, isGroup, lastReadByOthers));
+        }
+        if (scrollBottom || wasAtBottom) MsgScroll.ScrollToBottom();
+    }
+
+    async Task<List<(string Id, JsonNode Fields)>> QueryMessagesAsync(long sinceMs, int limitN, bool desc)
+    {
+        await Fire.EnsureTokenAsync();
+        var url = $"https://firestore.googleapis.com/v1/projects/{Fire.Project}/databases/(default)/documents/chats/{currentChatId}:runQuery";
+        var req = new System.Net.Http.HttpRequestMessage(System.Net.Http.HttpMethod.Post, url);
+        req.Headers.Add("Authorization", $"Bearer {Fire.IdToken}");
+        object structuredQuery = sinceMs > 0
+            ? new
+            {
+                from = new[] { new { collectionId = "messages" } },
+                where = new { fieldFilter = new { field = new { fieldPath = "createdAt" }, op = "GREATER_THAN", value = new { integerValue = sinceMs.ToString() } } },
+                orderBy = new[] { new { field = new { fieldPath = "createdAt" }, direction = desc ? "DESCENDING" : "ASCENDING" } },
+                limit = limitN,
+            }
+            : new
+            {
+                from = new[] { new { collectionId = "messages" } },
+                orderBy = new[] { new { field = new { fieldPath = "createdAt" }, direction = desc ? "DESCENDING" : "ASCENDING" } },
+                limit = limitN,
+            };
+        req.Content = System.Net.Http.Json.JsonContent.Create(new { structuredQuery });
+        using var http = new System.Net.Http.HttpClient();
+        var resp = await http.SendAsync(req);
+        var text = await resp.Content.ReadAsStringAsync();
+        var arr = JsonNode.Parse(text) as JsonArray ?? new JsonArray();
+        var list = new List<(string, JsonNode)>();
+        foreach (var row in arr)
+        {
+            var doc = row?["document"];
+            if (doc == null) continue;
+            var name = doc["name"]!.GetValue<string>();
+            list.Add((name[(name.LastIndexOf('/') + 1)..], doc["fields"] ?? new JsonObject()));
+        }
+        return list;
+    }
+
+    UIElement BuildBubble(string id, JsonNode m, bool isGroup, long lastReadByOthers)
+    {
+        var mine = Fire.FStr(m, "sender") == Fire.Uid;
+        var bubble = new Border
+        {
+            CornerRadius = new CornerRadius(18, 18, mine ? 6 : 18, mine ? 18 : 6),
+            Background = mine ? (Brush)FindResource("Inverse") : (Brush)FindResource("Surface"),
+            Padding = new Thickness(13, 8, 13, 8),
+            HorizontalAlignment = mine ? HorizontalAlignment.Right : HorizontalAlignment.Left,
+            MaxWidth = 540, Margin = new Thickness(0, 2, 0, 2),
+        };
+        var fg = mine ? (Brush)FindResource("OnInverse") : (Brush)FindResource("Text");
+        var stack = new StackPanel();
+
+        if (isGroup && !mine)
+            stack.Children.Add(new TextBlock { Text = Fire.FStr(m, "senderName"), FontSize = 11.5, FontWeight = FontWeights.Bold, Foreground = (Brush)FindResource("Muted"), Margin = new Thickness(0, 0, 0, 2) });
+
+        if (Fire.FStr(m, "forwardedFrom") is { Length: > 0 } fwd)
+            stack.Children.Add(new TextBlock { Text = $"Переслано от {fwd}", FontSize = 11.5, FontStyle = FontStyles.Italic, Foreground = fg, Opacity = 0.7 });
+
+        var reply = Fire.FMap(m, "replyTo");
+        if (reply.Count > 0)
+        {
+            var q = new Border { BorderBrush = fg, BorderThickness = new Thickness(2, 0, 0, 0), Padding = new Thickness(7, 0, 0, 0), Margin = new Thickness(0, 0, 0, 4), Opacity = 0.75 };
+            var qs = new StackPanel();
+            qs.Children.Add(new TextBlock { Text = reply.TryGetValue("sender", out var rs) ? rs as string : "", FontSize = 11.5, FontWeight = FontWeights.Bold, Foreground = fg });
+            qs.Children.Add(new TextBlock { Text = reply.TryGetValue("text", out var rt) ? rt as string : "", FontSize = 11.5, Foreground = fg, TextTrimming = TextTrimming.CharacterEllipsis, MaxWidth = 420 });
+            q.Child = qs;
+            stack.Children.Add(q);
+        }
+
+        if (Fire.FStr(m, "image") is { Length: > 0 } imgSrc && TryImage(imgSrc) is { } bmp)
+            stack.Children.Add(new Image { Source = bmp, MaxWidth = 320, MaxHeight = 320, Stretch = Stretch.Uniform, Margin = new Thickness(0, 2, 0, 4) });
+
+        if (Fire.FStr(m, "sticker") is { Length: > 0 } sticker && TryImage($"{Site}/stickers/{sticker}.png") is { } stImg)
+            stack.Children.Add(new Image { Source = stImg, Width = 130, Height = 130, Margin = new Thickness(0, 2, 0, 2) });
+
+        var voice = Fire.FMap(m, "voice");
+        if (voice.Count > 0)
+        {
+            var vb = new Button { Style = (Style)FindResource(mine ? "GhostBtn" : "PrimaryBtn"), Content = $"▶  Голосовое · {(voice.TryGetValue("duration", out var dur) ? dur : 0)} сек", FontSize = 12, Padding = new Thickness(12, 7, 12, 7), Margin = new Thickness(0, 2, 0, 4), HorizontalAlignment = HorizontalAlignment.Left };
+            var data = voice.TryGetValue("data", out var vd) ? vd as string : null;
+            vb.Click += (_, _) => PlayVoice(data);
+            stack.Children.Add(vb);
+        }
+
+        var poll = Fire.FMap(m, "poll");
+        if (poll.Count > 0)
+        {
+            var pStack = new StackPanel { Margin = new Thickness(0, 4, 0, 2), MinWidth = 220 };
+            pStack.Children.Add(new TextBlock { Text = "📊 " + (poll.TryGetValue("question", out var pq) ? pq as string : ""), FontWeight = FontWeights.Bold, Foreground = fg, Margin = new Thickness(0, 0, 0, 6), TextWrapping = TextWrapping.Wrap });
+            var votes = poll.TryGetValue("votes", out var vv) && vv is Dictionary<string, object?> vd ? vd : new Dictionary<string, object?>();
+            var total = votes.Count;
+            if (poll.TryGetValue("options", out var oo) && oo is List<object?> opts)
+                foreach (var optObj in opts)
+                {
+                    if (optObj is not Dictionary<string, object?> opt) continue;
+                    var oid = (opt.TryGetValue("id", out var oi) ? oi as string : "") ?? "";
+                    var otxt = (opt.TryGetValue("text", out var ot) ? ot as string : "") ?? "";
+                    var cnt = votes.Values.Count(x => x as string == oid);
+                    var pct = total > 0 ? (int)Math.Round(cnt * 100.0 / total) : 0;
+                    var myVote = votes.TryGetValue(Fire.Uid, out var mv) && mv as string == oid;
+                    var optBtn = new Border { BorderBrush = fg, BorderThickness = new Thickness(myVote ? 2 : 1), CornerRadius = new CornerRadius(10), Padding = new Thickness(10, 6, 10, 6), Margin = new Thickness(0, 0, 0, 5), Cursor = Cursors.Hand, Opacity = myVote ? 1 : 0.85 };
+                    var g2 = new Grid();
+                    g2.ColumnDefinitions.Add(new ColumnDefinition { Width = new GridLength(1, GridUnitType.Star) });
+                    g2.ColumnDefinitions.Add(new ColumnDefinition { Width = GridLength.Auto });
+                    g2.Children.Add(new TextBlock { Text = otxt, Foreground = fg, FontSize = 13, TextWrapping = TextWrapping.Wrap });
+                    var pctTb = new TextBlock { Text = total > 0 ? pct + "%" : "", Foreground = fg, FontWeight = FontWeights.Bold, FontSize = 12, Margin = new Thickness(8, 0, 0, 0) };
+                    Grid.SetColumn(pctTb, 1);
+                    g2.Children.Add(pctTb);
+                    optBtn.Child = g2;
+                    var msgId = id; var optId = oid;
+                    var cur = votes.TryGetValue(Fire.Uid, out var c2) ? c2 as string : null;
+                    optBtn.MouseLeftButtonUp += async (_, _) => await VotePollAsync(msgId, optId, cur == optId);
+                    pStack.Children.Add(optBtn);
+                }
+            pStack.Children.Add(new TextBlock { Text = total > 0 ? $"Голосов: {total}" : "Будьте первым — голосуйте!", Foreground = fg, FontSize = 10.5, Opacity = 0.65 });
+            stack.Children.Add(pStack);
+        }
+
+        if (Fire.FStr(m, "text") is { Length: > 0 } text)
+            stack.Children.Add(new TextBlock { Text = text, FontSize = 13.5, Foreground = fg, TextWrapping = TextWrapping.Wrap });
+
+        var created = Fire.FLong(m, "createdAt");
+        var meta = DateTimeOffset.FromUnixTimeMilliseconds(created).ToLocalTime().ToString("HH:mm");
+        if (Fire.FLong(m, "editedAt") > 0) meta = "изм. " + meta;
+        if (mine) meta += lastReadByOthers >= created ? "  ✓✓" : "  ✓";
+        stack.Children.Add(new TextBlock { Text = meta, FontSize = 9.5, Foreground = fg, Opacity = 0.6, HorizontalAlignment = HorizontalAlignment.Right, Margin = new Thickness(0, 2, 0, 0) });
+
+        // реакции
+        var reactions = Fire.FMap(m, "reactions");
+        if (reactions.Count > 0)
+        {
+            var wrap = new WrapPanel { Margin = new Thickness(0, 3, 0, 0) };
+            foreach (var kv in reactions)
+                if (kv.Value is List<object?> users && users.Count > 0)
+                {
+                    var chip = new Border { Background = (Brush)FindResource("Surface"), CornerRadius = new CornerRadius(99), Padding = new Thickness(7, 2, 7, 2), Margin = new Thickness(0, 0, 4, 0) };
+                    chip.Child = new TextBlock { Text = $"{kv.Key} {users.Count}", FontSize = 11, Foreground = (Brush)FindResource("Text") };
+                    wrap.Children.Add(chip);
+                }
+            stack.Children.Add(wrap);
+        }
+
+        bubble.Child = stack;
+        return bubble;
+    }
+
+    async Task VotePollAsync(string messageId, string optionId, bool remove)
+    {
+        try
+        {
+            if (remove)
+                await Fire.PatchDocAsync($"chats/{currentChatId}/messages/{messageId}", new(), new[] { $"poll.votes.{Fire.Uid}" });
+            else
+                await Fire.PatchDocAsync($"chats/{currentChatId}/messages/{messageId}",
+                    new() { ["poll"] = new Dictionary<string, object?> { ["votes"] = new Dictionary<string, object?> { [Fire.Uid] = optionId } } },
+                    new[] { $"poll.votes.{Fire.Uid}" });
+            _ = BumpAsync(currentChatId);
+            var fresh = await Fire.GetDocAsync($"chats/{currentChatId}/messages/{messageId}");
+            if (fresh?["fields"] != null)
+            {
+                loadedMsgs.RemoveAll(x => x.Id == messageId);
+                loadedMsgs.Add((messageId, fresh["fields"]!));
+                RenderMessages();
+            }
+        }
+        catch (FireException ex) { MessageBox.Show(ex.Ru, "SandyGram"); }
+        catch { }
+    }
+
+    void PlayVoice(string? dataUrl)
+    {
+        if (string.IsNullOrEmpty(dataUrl)) return;
+        try
+        {
+            var b64 = dataUrl[(dataUrl.IndexOf(",") + 1)..];
+            var ext = dataUrl.Contains("audio/mp4") ? ".m4a" : ".webm";
+            var tmp = Path.Combine(Path.GetTempPath(), $"sandygram_voice_{Guid.NewGuid():N}{ext}");
+            File.WriteAllBytes(tmp, Convert.FromBase64String(b64));
+            System.Diagnostics.Process.Start(new System.Diagnostics.ProcessStartInfo(tmp) { UseShellExecute = true });
+        }
+        catch (Exception ex) { MessageBox.Show(ex.Message, "SandyGram"); }
+    }
+
+    // ================================================================ отправка
+    void MsgInput_KeyDown(object sender, KeyEventArgs e)
+    {
+        if (e.Key == Key.Enter) { e.Handled = true; SendBtn_Click(sender, e); }
+    }
+
+    async void SendBtn_Click(object sender, RoutedEventArgs e)
+    {
+        if (sending || string.IsNullOrEmpty(currentChatId)) return;
+        var text = MsgInput.Text.Trim();
+        if (text.Length == 0) return;
+        if (!chats.TryGetValue(currentChatId, out var f)) return;
+        sending = true;
+        MsgInput.Text = ""; // мгновенно, защита от спама
+        drafts.Remove(currentChatId);
+        try
+        {
+            var now = DateTimeOffset.UtcNow.ToUnixTimeMilliseconds();
+            var msgId = Fire.RandomId();
+            var members = Fire.FList(f, "members").Select(m => m as string).Where(m => m != null).ToList();
+            // форум: с десктопа пишем в «Общий»
+            var msgFields = Fire.ToFsFields(new()
+            {
+                ["sender"] = Fire.Uid,
+                ["senderName"] = myDisplayName.Length > 0 ? myDisplayName : myUsername,
+                ["text"] = text.Length > 4000 ? text[..4000] : text,
+                ["image"] = null,
+                ["createdAt"] = now,
+                ["reactions"] = new Dictionary<string, object?>(),
+                ["topicId"] = "general",
+            });
+            var chatUpdateFields = Fire.ToFsFields(new()
+            {
+                ["lastMessage"] = new Dictionary<string, object?>
+                {
+                    ["text"] = text.Length > 4000 ? text[..4000] : text,
+                    ["senderUid"] = Fire.Uid,
+                    ["senderName"] = myDisplayName.Length > 0 ? myDisplayName : myUsername,
+                    ["createdAt"] = now,
+                    ["hasImage"] = false,
+                },
+                ["lastRead"] = new Dictionary<string, object?> { [Fire.Uid] = now },
+                ["unread"] = new Dictionary<string, object?> { [Fire.Uid] = 0L },
+            });
+            var transforms = members.Where(mb => mb != Fire.Uid).Select(mb => new
+            {
+                fieldPath = $"unread.{mb}",
+                increment = new { integerValue = "1" },
+            }).ToArray();
+
+            var writes = new List<object>
+            {
+                new
+                {
+                    update = new { name = Fire.DocName($"chats/{currentChatId}/messages/{msgId}"), fields = msgFields },
+                    currentDocument = new { exists = false },
+                },
+                new
+                {
+                    update = new { name = Fire.DocName($"chats/{currentChatId}"), fields = chatUpdateFields },
+                    updateMask = new { fieldPaths = new[] { "lastMessage", $"lastRead.{Fire.Uid}", $"unread.{Fire.Uid}" } },
+                    updateTransforms = transforms,
+                },
+            };
+            await Fire.CommitAsync(writes.ToArray());
+            _ = BumpAsync(currentChatId);
+            await PollMessagesAsync();
+        }
+        catch (FireException ex)
+        {
+            MsgInput.Text = text;
+            var isPrivate = Fire.FStr(f, "type") == "private";
+            MessageBox.Show(isPrivate && ex.Message.Contains("PERMISSION") ? "Не отправлено: пользователь вас заблокировал" : ex.Ru, "SandyGram");
+        }
+        catch (Exception ex) { MsgInput.Text = text; MessageBox.Show(ex.Message, "SandyGram"); }
+        finally { sending = false; MsgInput.Focus(); }
+    }
+}

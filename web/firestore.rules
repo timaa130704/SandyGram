@@ -75,12 +75,13 @@ service cloud.firestore {
           && request.resource.data.sender == request.auth.uid
           && (chatData().type != 'channel' || amChatAdmin())
           && (chatData().type != 'private' || !blockedByRecipient());
-        // Правка/реакции/удаление: автор, либо админ группы, либо участник меняет только reactions
+        // Правка/реакции/голоса/удаление: автор, либо админ, либо участник меняет только reactions/poll
         allow update, delete: if authed()
           && request.auth.uid in chatData().members
           && (resource.data.sender == request.auth.uid
               || amChatAdmin()
-              || request.resource.data.diff(resource.data).affectedKeys().hasOnly(['reactions']));
+              || request.resource.data.diff(resource.data).affectedKeys().hasOnly(['reactions'])
+              || request.resource.data.diff(resource.data).affectedKeys().hasOnly(['poll']));
       }
     }
   }

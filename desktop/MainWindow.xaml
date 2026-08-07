@@ -1,0 +1,307 @@
+<Window x:Class="SandyGram.MainWindow"
+        xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
+        xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+        Title="SandyGram" Height="740" Width="1120" MinWidth="760" MinHeight="500"
+        Background="#0A0A0A" WindowStartupLocation="CenterScreen"
+        FontFamily="./Fonts/#Google Sans, Segoe UI"
+        TextOptions.TextRenderingMode="ClearType" UseLayoutRounding="True">
+  <Window.Resources>
+    <SolidColorBrush x:Key="Bg" Color="#0A0A0A"/>
+    <SolidColorBrush x:Key="Surface" Color="#141414"/>
+    <SolidColorBrush x:Key="Surface2" Color="#1D1D1D"/>
+    <SolidColorBrush x:Key="Surface3" Color="#262626"/>
+    <SolidColorBrush x:Key="Outline" Color="#2A2A2A"/>
+    <SolidColorBrush x:Key="Text" Color="#F2F2F2"/>
+    <SolidColorBrush x:Key="Muted" Color="#8F8F8F"/>
+    <SolidColorBrush x:Key="Faint" Color="#5A5A5A"/>
+    <SolidColorBrush x:Key="Inverse" Color="#F5F5F5"/>
+    <SolidColorBrush x:Key="OnInverse" Color="#0D0D0D"/>
+
+    <!-- тонкий скроллбар в стиле M3 -->
+    <Style TargetType="ScrollBar">
+      <Setter Property="Width" Value="6"/>
+      <Setter Property="Background" Value="Transparent"/>
+      <Setter Property="Template">
+        <Setter.Value>
+          <ControlTemplate TargetType="ScrollBar">
+            <Grid Background="Transparent">
+              <Track x:Name="PART_Track" IsDirectionReversed="True">
+                <Track.Thumb>
+                  <Thumb>
+                    <Thumb.Template>
+                      <ControlTemplate TargetType="Thumb">
+                        <Border Background="#333333" CornerRadius="3" Margin="1,2"/>
+                      </ControlTemplate>
+                    </Thumb.Template>
+                  </Thumb>
+                </Track.Thumb>
+              </Track>
+            </Grid>
+          </ControlTemplate>
+        </Setter.Value>
+      </Setter>
+    </Style>
+
+    <Style x:Key="Input" TargetType="TextBox">
+      <Setter Property="Background" Value="{StaticResource Surface2}"/>
+      <Setter Property="Foreground" Value="#F2F2F2"/>
+      <Setter Property="BorderThickness" Value="0"/>
+      <Setter Property="Padding" Value="14,0"/>
+      <Setter Property="FontSize" Value="14"/>
+      <Setter Property="CaretBrush" Value="#F2F2F2"/>
+      <Setter Property="SelectionBrush" Value="#5A5A5A"/>
+      <Setter Property="VerticalContentAlignment" Value="Center"/>
+      <Setter Property="Template">
+        <Setter.Value>
+          <ControlTemplate TargetType="TextBox">
+            <Border Background="{TemplateBinding Background}" CornerRadius="14" SnapsToDevicePixels="True">
+              <ScrollViewer x:Name="PART_ContentHost" Focusable="False"
+                            Padding="{TemplateBinding Padding}"
+                            VerticalContentAlignment="{TemplateBinding VerticalContentAlignment}"
+                            HorizontalScrollBarVisibility="Hidden" VerticalScrollBarVisibility="Hidden"/>
+            </Border>
+          </ControlTemplate>
+        </Setter.Value>
+      </Setter>
+    </Style>
+    <Style x:Key="PwInput" TargetType="PasswordBox">
+      <Setter Property="Background" Value="{StaticResource Surface2}"/>
+      <Setter Property="Foreground" Value="#F2F2F2"/>
+      <Setter Property="BorderThickness" Value="0"/>
+      <Setter Property="Padding" Value="14,0"/>
+      <Setter Property="FontSize" Value="14"/>
+      <Setter Property="CaretBrush" Value="#F2F2F2"/>
+      <Setter Property="SelectionBrush" Value="#5A5A5A"/>
+      <Setter Property="VerticalContentAlignment" Value="Center"/>
+      <Setter Property="Template">
+        <Setter.Value>
+          <ControlTemplate TargetType="PasswordBox">
+            <Border Background="{TemplateBinding Background}" CornerRadius="14" SnapsToDevicePixels="True">
+              <ScrollViewer x:Name="PART_ContentHost" Focusable="False"
+                            Padding="{TemplateBinding Padding}"
+                            VerticalContentAlignment="{TemplateBinding VerticalContentAlignment}"
+                            HorizontalScrollBarVisibility="Hidden" VerticalScrollBarVisibility="Hidden"/>
+            </Border>
+          </ControlTemplate>
+        </Setter.Value>
+      </Setter>
+    </Style>
+
+    <Style x:Key="PrimaryBtn" TargetType="Button">
+      <Setter Property="Background" Value="{StaticResource Inverse}"/>
+      <Setter Property="Foreground" Value="{StaticResource OnInverse}"/>
+      <Setter Property="FontWeight" Value="SemiBold"/>
+      <Setter Property="FontSize" Value="14"/>
+      <Setter Property="Padding" Value="18,0"/>
+      <Setter Property="BorderThickness" Value="0"/>
+      <Setter Property="Cursor" Value="Hand"/>
+      <Setter Property="Template">
+        <Setter.Value>
+          <ControlTemplate TargetType="Button">
+            <Border x:Name="b" Background="{TemplateBinding Background}" CornerRadius="14" Padding="{TemplateBinding Padding}" SnapsToDevicePixels="True">
+              <ContentPresenter HorizontalAlignment="Center" VerticalAlignment="Center"/>
+            </Border>
+            <ControlTemplate.Triggers>
+              <Trigger Property="IsMouseOver" Value="True"><Setter TargetName="b" Property="Opacity" Value="0.86"/></Trigger>
+              <Trigger Property="IsEnabled" Value="False"><Setter TargetName="b" Property="Opacity" Value="0.45"/></Trigger>
+            </ControlTemplate.Triggers>
+          </ControlTemplate>
+        </Setter.Value>
+      </Setter>
+    </Style>
+    <Style x:Key="GhostBtn" TargetType="Button" BasedOn="{StaticResource PrimaryBtn}">
+      <Setter Property="Background" Value="{StaticResource Surface2}"/>
+      <Setter Property="Foreground" Value="{StaticResource Text}"/>
+    </Style>
+    <!-- круглая иконочная кнопка -->
+    <Style x:Key="IconBtn" TargetType="Button">
+      <Setter Property="Background" Value="Transparent"/>
+      <Setter Property="Foreground" Value="{StaticResource Muted}"/>
+      <Setter Property="FontSize" Value="16"/>
+      <Setter Property="Width" Value="38"/>
+      <Setter Property="Height" Value="38"/>
+      <Setter Property="BorderThickness" Value="0"/>
+      <Setter Property="Cursor" Value="Hand"/>
+      <Setter Property="Template">
+        <Setter.Value>
+          <ControlTemplate TargetType="Button">
+            <Border x:Name="b" Background="{TemplateBinding Background}" CornerRadius="19">
+              <ContentPresenter HorizontalAlignment="Center" VerticalAlignment="Center"/>
+            </Border>
+            <ControlTemplate.Triggers>
+              <Trigger Property="IsMouseOver" Value="True">
+                <Setter TargetName="b" Property="Background" Value="{StaticResource Surface3}"/>
+              </Trigger>
+            </ControlTemplate.Triggers>
+          </ControlTemplate>
+        </Setter.Value>
+      </Setter>
+    </Style>
+    <!-- строка чата: ховер как в M3 -->
+    <Style x:Key="ChatRow" TargetType="Border">
+      <Setter Property="Background" Value="Transparent"/>
+      <Setter Property="CornerRadius" Value="16"/>
+      <Setter Property="Cursor" Value="Hand"/>
+      <Style.Triggers>
+        <Trigger Property="IsMouseOver" Value="True">
+          <Setter Property="Background" Value="{StaticResource Surface2}"/>
+        </Trigger>
+      </Style.Triggers>
+    </Style>
+  </Window.Resources>
+
+  <Grid>
+    <!-- ===== Экран входа ===== -->
+    <Grid x:Name="AuthPanel" Background="#0A0A0A">
+      <Border Background="{StaticResource Surface}" CornerRadius="26" Padding="36,34" Width="380" VerticalAlignment="Center">
+        <StackPanel>
+          <Border Background="{StaticResource Inverse}" CornerRadius="18" Width="58" Height="58" HorizontalAlignment="Center">
+            <TextBlock Text="S" FontSize="27" FontWeight="ExtraBold" Foreground="{StaticResource OnInverse}" HorizontalAlignment="Center" VerticalAlignment="Center"/>
+          </Border>
+          <TextBlock Text="SandyGram" FontSize="24" FontWeight="ExtraBold" Foreground="{StaticResource Text}" HorizontalAlignment="Center" Margin="0,12,0,2"/>
+          <TextBlock Text="Быстрый монохромный мессенджер" Foreground="{StaticResource Muted}" FontSize="12.5" HorizontalAlignment="Center" Margin="0,0,0,22"/>
+          <TextBox x:Name="LoginUser" Style="{StaticResource Input}" Margin="0,0,0,8" Height="44"/>
+          <PasswordBox x:Name="LoginPass" Style="{StaticResource PwInput}" Margin="0,0,0,4" Height="44"/>
+          <TextBlock Text="имя пользователя и пароль" Foreground="{StaticResource Faint}" FontSize="10.5" HorizontalAlignment="Center" Margin="0,0,0,10"/>
+          <TextBlock x:Name="AuthError" Foreground="#FF6B6B" FontSize="12" TextWrapping="Wrap" TextAlignment="Center" Margin="0,0,0,8"/>
+          <Grid Margin="0,0,0,14">
+            <Grid.ColumnDefinitions>
+              <ColumnDefinition Width="*"/><ColumnDefinition Width="8"/><ColumnDefinition Width="*"/>
+            </Grid.ColumnDefinitions>
+            <Button x:Name="LoginBtn" Grid.Column="0" Style="{StaticResource PrimaryBtn}" Content="Войти" Height="44" Click="LoginBtn_Click"/>
+            <Button x:Name="RegisterBtn" Grid.Column="2" Style="{StaticResource GhostBtn}" Content="Создать аккаунт" Height="44" Click="RegisterBtn_Click"/>
+          </Grid>
+          <Grid Margin="0,0,0,14">
+            <Grid.ColumnDefinitions>
+              <ColumnDefinition Width="*"/><ColumnDefinition Width="Auto"/><ColumnDefinition Width="*"/>
+            </Grid.ColumnDefinitions>
+            <Rectangle Grid.Column="0" Height="1" Fill="{StaticResource Outline}" VerticalAlignment="Center"/>
+            <TextBlock Grid.Column="1" Text="  или  " Foreground="{StaticResource Faint}" FontSize="11"/>
+            <Rectangle Grid.Column="2" Height="1" Fill="{StaticResource Outline}" VerticalAlignment="Center"/>
+          </Grid>
+          <Button x:Name="GoogleBtn" Style="{StaticResource GhostBtn}" Height="44" Click="GoogleBtn_Click">
+            <StackPanel Orientation="Horizontal">
+              <TextBlock FontWeight="ExtraBold" FontSize="14" Margin="0,0,9,0">
+                <Run Foreground="#4285F4">G</Run><Run Foreground="#EA4335">o</Run><Run Foreground="#FBBC05">o</Run><Run Foreground="#4285F4">g</Run><Run Foreground="#34A853">l</Run><Run Foreground="#EA4335">e</Run>
+              </TextBlock>
+              <TextBlock Text="Войти через браузер" Foreground="{StaticResource Text}" FontWeight="SemiBold" FontSize="13.5"/>
+            </StackPanel>
+          </Button>
+        </StackPanel>
+      </Border>
+    </Grid>
+
+    <!-- ===== Выбор username (первый вход через Google) ===== -->
+    <Grid x:Name="PickPanel" Background="#0A0A0A" Visibility="Collapsed">
+      <Border Background="{StaticResource Surface}" CornerRadius="26" Padding="36,34" Width="380" VerticalAlignment="Center">
+        <StackPanel>
+          <TextBlock Text="Придумайте @username" FontSize="21" FontWeight="ExtraBold" Foreground="{StaticResource Text}" HorizontalAlignment="Center" Margin="0,0,0,6"/>
+          <TextBlock Text="Вы вошли через Google. Осталось выбрать имя, по которому вас смогут найти." Foreground="{StaticResource Muted}" FontSize="12.5" TextWrapping="Wrap" TextAlignment="Center" Margin="0,0,0,16"/>
+          <TextBox x:Name="PickName" Style="{StaticResource Input}" Height="44" Margin="0,0,0,10"/>
+          <TextBlock x:Name="PickError" Foreground="#FF6B6B" FontSize="12" TextWrapping="Wrap" TextAlignment="Center" Margin="0,0,0,8"/>
+          <Button x:Name="PickBtn" Style="{StaticResource PrimaryBtn}" Content="Готово" Height="44" Click="PickBtn_Click"/>
+        </StackPanel>
+      </Border>
+    </Grid>
+
+    <!-- ===== Мессенджер: плавающие острова на чёрном холсте ===== -->
+    <Grid x:Name="MainPanel" Visibility="Collapsed" Margin="12">
+      <Grid.ColumnDefinitions>
+        <ColumnDefinition Width="330"/>
+        <ColumnDefinition Width="12"/>
+        <ColumnDefinition Width="*"/>
+      </Grid.ColumnDefinitions>
+
+      <!-- остров: список чатов -->
+      <Border Grid.Column="0" Background="{StaticResource Surface}" CornerRadius="24">
+        <Grid Margin="10">
+          <Grid.RowDefinitions>
+            <RowDefinition Height="Auto"/>
+            <RowDefinition Height="Auto"/>
+            <RowDefinition Height="*"/>
+          </Grid.RowDefinitions>
+          <!-- мой профиль -->
+          <Grid Grid.Row="0" Margin="6,4,2,10">
+            <Grid.ColumnDefinitions>
+              <ColumnDefinition Width="Auto"/>
+              <ColumnDefinition Width="*"/>
+              <ColumnDefinition Width="Auto"/>
+            </Grid.ColumnDefinitions>
+            <ContentControl x:Name="MyAvatar"/>
+            <StackPanel Grid.Column="1" VerticalAlignment="Center" Margin="10,0,0,0">
+              <TextBlock x:Name="MyName" FontWeight="Bold" FontSize="14.5" Foreground="{StaticResource Text}" TextTrimming="CharacterEllipsis"/>
+              <TextBlock x:Name="MyHandle" FontSize="11.5" Foreground="{StaticResource Muted}"/>
+            </StackPanel>
+            <Button x:Name="LogoutBtn" Grid.Column="2" Style="{StaticResource IconBtn}" Content="⏻" ToolTip="Выйти" Click="LogoutBtn_Click"/>
+          </Grid>
+          <!-- поиск -->
+          <TextBox x:Name="SearchBox" Grid.Row="1" Style="{StaticResource Input}" Height="38" FontSize="13"
+                   Margin="2,0,2,10" TextChanged="SearchBox_Changed" Tag="Поиск"/>
+          <ScrollViewer Grid.Row="2" VerticalScrollBarVisibility="Auto">
+            <StackPanel x:Name="ChatList" Margin="0,0,2,0"/>
+          </ScrollViewer>
+        </Grid>
+      </Border>
+
+      <!-- правая колонка -->
+      <Grid Grid.Column="2">
+        <Grid.RowDefinitions>
+          <RowDefinition Height="Auto"/>
+          <RowDefinition Height="*"/>
+          <RowDefinition Height="Auto"/>
+        </Grid.RowDefinitions>
+
+        <!-- остров: шапка диалога -->
+        <Border x:Name="ChatHeader" Grid.Row="0" Background="{StaticResource Surface}" CornerRadius="20" Padding="14,10" Visibility="Collapsed">
+          <Grid>
+            <Grid.ColumnDefinitions>
+              <ColumnDefinition Width="Auto"/>
+              <ColumnDefinition Width="*"/>
+            </Grid.ColumnDefinitions>
+            <ContentControl x:Name="ChatAvatar"/>
+            <StackPanel Grid.Column="1" VerticalAlignment="Center" Margin="12,0,0,0">
+              <TextBlock x:Name="ChatTitle" FontWeight="Bold" FontSize="15.5" Foreground="{StaticResource Text}"/>
+              <TextBlock x:Name="ChatSubtitle" Foreground="{StaticResource Muted}" FontSize="11.5"/>
+            </StackPanel>
+          </Grid>
+        </Border>
+
+        <!-- пустое состояние -->
+        <StackPanel x:Name="EmptyState" Grid.Row="1" VerticalAlignment="Center" HorizontalAlignment="Center">
+          <TextBlock Text="✦" FontSize="42" Foreground="{StaticResource Faint}" HorizontalAlignment="Center"/>
+          <TextBlock Text="Выберите чат, чтобы начать общение" Foreground="{StaticResource Muted}" FontSize="14" Margin="0,10,0,0"/>
+        </StackPanel>
+
+        <!-- лента сообщений прямо на холсте -->
+        <ScrollViewer x:Name="MsgScroll" Grid.Row="1" VerticalScrollBarVisibility="Auto" Padding="6,10">
+          <StackPanel x:Name="MsgList" MaxWidth="880"/>
+        </ScrollViewer>
+
+        <!-- остров: композер -->
+        <Border x:Name="Composer" Grid.Row="2" Background="{StaticResource Surface}" CornerRadius="22" Padding="10" Visibility="Collapsed" Margin="0,10,0,0">
+          <Grid>
+            <Grid.ColumnDefinitions>
+              <ColumnDefinition Width="*"/>
+              <ColumnDefinition Width="Auto"/>
+            </Grid.ColumnDefinitions>
+            <TextBox x:Name="MsgInput" Grid.Column="0" Style="{StaticResource Input}" FontSize="14" Height="44"
+                     AcceptsReturn="False" KeyDown="MsgInput_KeyDown" Tag="Сообщение"/>
+            <Button x:Name="SendBtn" Grid.Column="1" Width="44" Height="44" Margin="10,0,0,0"
+                    Cursor="Hand" BorderThickness="0" Click="SendBtn_Click">
+              <Button.Template>
+                <ControlTemplate TargetType="Button">
+                  <Border x:Name="b" Background="{StaticResource Inverse}" CornerRadius="22">
+                    <TextBlock Text="➤" FontSize="16" Foreground="{StaticResource OnInverse}" HorizontalAlignment="Center" VerticalAlignment="Center" Margin="2,0,0,0"/>
+                  </Border>
+                  <ControlTemplate.Triggers>
+                    <Trigger Property="IsMouseOver" Value="True"><Setter TargetName="b" Property="Opacity" Value="0.86"/></Trigger>
+                  </ControlTemplate.Triggers>
+                </ControlTemplate>
+              </Button.Template>
+            </Button>
+          </Grid>
+        </Border>
+      </Grid>
+    </Grid>
+  </Grid>
+</Window>

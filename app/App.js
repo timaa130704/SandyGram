@@ -14,6 +14,8 @@ import { useAudioRecorder, RecordingPresets, AudioModule, setAudioModeAsync, cre
 import * as FileSystem from "expo-file-system/legacy";
 import * as ImageManipulator from "expo-image-manipulator";
 import * as Notifications from "expo-notifications";
+import { useFonts } from "expo-font";
+import { MaterialIcons } from "@expo/vector-icons";
 import AsyncStorage from "@react-native-async-storage/async-storage";
 import { auth, db } from "./fire";
 import {
@@ -45,8 +47,16 @@ const AVATAR_TONES = ["#2b2b2b", "#3a3a3a", "#4a4a4a", "#5a5a5a", "#6b6b6b", "#7
 const ONLINE_WINDOW = 70e3;
 const QUICK_REACTIONS = ["❤️", "👍", "🔥", "😂", "😮", "😢"];
 const SITE = "https://sandygram-a3b42.web.app";
-const APP_VERSION = "1.2.1";
+const APP_VERSION = "1.3.0";
 const APK_URL = "https://github.com/timaa130704/SandyGram/releases/latest/download/SandyGram.apk";
+// Сигнальная шина RTDB — для мгновенного realtime у ПК-клиента
+const RTDB = "https://sandygram-a3b42-default-rtdb.europe-west1.firebasedatabase.app";
+async function bumpChat(chatId) {
+  try {
+    const t = await auth.currentUser?.getIdToken();
+    if (t) fetch(`${RTDB}/bump/${encodeURIComponent(chatId)}.json?auth=${t}`, { method: "PUT", body: String(Date.now()) }).catch(() => { });
+  } catch { }
+}
 // Коды стикеров OpenMoji — картинки лежат на хостинге сайта
 const STICKERS = ["1F600","1F602","1F60D","1F60E","1F914","1F644","1F62D","1F621","1F973","1F97A","1F480","1F4A9","1F525","2764","1F44D","1F44E","1F44C","1F64F","1F4AA","1F440","1F389","1F680","26A1","1F31A","1F31D","1F63B","1F63C","1F998","1F984","1F37F"];
 
@@ -164,7 +174,24 @@ function MentionText({ text, style, mentionStyle, onMention }) {
 }
 
 // ================================================================
+function applyGlobalFont() {
+  // выставляем Google Sans всем Text/TextInput по умолчанию
+  for (const C of [Text, TextInput]) {
+    const anyC = C;
+    anyC.defaultProps = anyC.defaultProps || {};
+    const prev = anyC.defaultProps.style;
+    anyC.defaultProps.style = [{ fontFamily: "GoogleSans" }, prev].filter(Boolean);
+  }
+}
+
 export default function Root() {
+  const [fontsLoaded] = useFonts({
+    GoogleSans: require("./assets/fonts/GoogleSans-Regular.ttf"),
+    GoogleSansMedium: require("./assets/fonts/GoogleSans-Medium.ttf"),
+    GoogleSansBold: require("./assets/fonts/GoogleSans-Bold.ttf"),
+  });
+  if (fontsLoaded) applyGlobalFont();
+  if (!fontsLoaded) return <View style={{ flex: 1, backgroundColor: "#0a0a0a" }} />;
   return (
     <SafeAreaProvider>
       <SandyGram />
@@ -356,7 +383,7 @@ function SandyGram() {
       v.peerUid = uid; v.peer = peer;
       v.title = peer?.displayName || "…"; v.avatarColor = peer?.avatarColor ?? 0;
       v.photo = peer?.avatar || null;
-    } else { v.title = chat.title; v.avatarColor = chat.avatarColor || 0; }
+    } else { v.title = chat.title; v.avatarColor = chat.avatarColor || 0; v.photo = chat.avatar || null; }
     return v;
   }, [me, users]);
 
@@ -640,10 +667,10 @@ function ListScreen({ ctx }) {
   return (
     <SafeAreaView style={{ flex: 1 }}>
       <View style={{ flexDirection: "row", alignItems: "center", paddingHorizontal: 14, paddingVertical: 10, gap: 12 }}>
-        <TouchableOpacity onPress={() => setSettingsOpen(true)}><Text style={{ color: T.text, fontSize: 22 }}>☰</Text></TouchableOpacity>
+        <TouchableOpacity onPress={() => setSettingsOpen(true)} style={{ padding: 2 }}><MaterialIcons name="menu" size={25} color={T.text} /></TouchableOpacity>
         <TextInput value={search} onChangeText={setSearch} placeholder="Поиск" placeholderTextColor={T.muted} autoCapitalize="none"
           style={{ flex: 1, backgroundColor: T.surface2, color: T.text, borderRadius: 999, paddingHorizontal: 16, paddingVertical: 8, fontSize: 15 }} />
-        {!!search && <TouchableOpacity onPress={() => setSearch("")}><Text style={{ color: T.muted, fontSize: 18 }}>✕</Text></TouchableOpacity>}
+        {!!search && <TouchableOpacity onPress={() => setSearch("")}><MaterialIcons name="close" size={20} color={T.muted} /></TouchableOpacity>}
       </View>
       <FlatList
         data={shown}
@@ -688,7 +715,7 @@ function ListScreen({ ctx }) {
       />
       <TouchableOpacity onPress={() => setNewChatOpen(true)}
         style={{ position: "absolute", right: 20, bottom: 28, width: 60, height: 60, borderRadius: 20, backgroundColor: T.inverse, alignItems: "center", justifyContent: "center", elevation: 6 }}>
-        <Text style={{ color: T.onInverse, fontSize: 24 }}>✎</Text>
+        <MaterialIcons name="edit" size={24} color={T.onInverse} />
       </TouchableOpacity>
       {settingsOpen && <SettingsSheet ctx={ctx} onClose={() => setSettingsOpen(false)} />}
       {newChatOpen && <NewChatSheet ctx={ctx} onClose={() => setNewChatOpen(false)} />}
@@ -893,6 +920,7 @@ function ChatInfoSheet({ ctx, chat, onClose }) {
   const [members, setMembers] = useState([]);
   const [memberMenu, setMemberMenu] = useState(null);
   const [addOpen, setAddOpen] = useState(false);
+  const [editGroupOpen, setEditGroupOpen] = useState(false);
   const iAmOwner = chat.ownerUid === me.uid;
   const iAmAdmin = (chat.type === "group" || chat.type === "channel") && (iAmOwner || (chat.admins || []).includes(me.uid));
   const roleOf = (uid) => uid === chat.ownerUid ? "owner" : ((chat.admins || []).includes(uid) ? "admin" : "member");
@@ -982,6 +1010,9 @@ function ChatInfoSheet({ ctx, chat, onClose }) {
             </TouchableOpacity>
           )}
           {(chat.type === "group" || chat.type === "channel") && (<>
+            {iAmAdmin && (
+              <TouchableOpacity style={st.row} onPress={() => setEditGroupOpen(true)}><Text style={{ color: T.text, fontSize: 16 }}>✎  Название и фото</Text></TouchableOpacity>
+            )}
             <TouchableOpacity style={st.row} onPress={() => setAddOpen(true)}><Text style={{ color: T.text, fontSize: 16 }}>＋  Добавить участника</Text></TouchableOpacity>
             {iAmAdmin && <TouchableOpacity style={st.row} onPress={inviteLink}><Text style={{ color: T.text, fontSize: 16 }}>🔗  Ссылка приглашения</Text></TouchableOpacity>}
             <Text style={{ color: T.muted, fontSize: 12, textTransform: "uppercase", letterSpacing: 1, marginTop: 10, marginBottom: 4 }}>Участники</Text>
@@ -1000,6 +1031,27 @@ function ChatInfoSheet({ ctx, chat, onClose }) {
       {memberMenu && memberItems(memberMenu).length > 0 && (
         <ActionSheet T={T} items={memberItems(memberMenu)} onClose={() => setMemberMenu(null)}
           header={<Text style={{ color: T.muted, fontWeight: "700", padding: 8 }}>{memberMenu.displayName}</Text>} />
+      )}
+      {editGroupOpen && (
+        <PromptModal T={T} title="Название и фото" submitLabel="Сохранить"
+          fields={[{ key: "title", placeholder: "Название", value: chat.title || "" }]}
+          onClose={() => setEditGroupOpen(false)}
+          onSubmit={async ({ title }) => {
+            try {
+              const patch = { title: title.trim().slice(0, 60) || chat.title };
+              Alert.alert("Фото", "Выбрать новое фото?", [
+                { text: "Без фото", onPress: async () => { await updateDoc(doc(db, "chats", chat.id), patch); } },
+                { text: "Выбрать", onPress: async () => {
+                  const res = await ImagePicker.launchImageLibraryAsync({ mediaTypes: ["images"], allowsEditing: true, aspect: [1, 1], quality: 1 });
+                  if (!res.canceled && res.assets?.[0]?.uri) {
+                    const small = await ImageManipulator.manipulateAsync(res.assets[0].uri, [{ resize: { width: 128 } }], { compress: 0.7, format: ImageManipulator.SaveFormat.JPEG, base64: true });
+                    patch.avatar = `data:image/jpeg;base64,${small.base64}`;
+                  }
+                  await updateDoc(doc(db, "chats", chat.id), patch);
+                } },
+              ]);
+            } catch (e) { Alert.alert("Ошибка", ruError(e)); }
+          }} />
       )}
       {addOpen && (
         <PromptModal T={T} title="Добавить участника" submitLabel="Добавить"
@@ -1036,6 +1088,8 @@ function ChatScreen({ ctx, chatId }) {
   const [searchOpen, setSearchOpen] = useState(false);
   const [searchText, setSearchText] = useState("");
   const [stickerOpen, setStickerOpen] = useState(false);
+  const [attachOpen, setAttachOpen] = useState(false);
+  const [pollOpen, setPollOpen] = useState(false);
   const [recording, setRecording] = useState(false);
   const recorder = useAudioRecorder(RecordingPresets.LOW_QUALITY);
   const recStartRef = useRef(0);
@@ -1066,6 +1120,10 @@ function ChatScreen({ ctx, chatId }) {
   }, []);
 
   useEffect(() => {
+    AsyncStorage.getItem(`draft_${chatId}`).then(v => { if (v) setText(v); }).catch(() => { });
+  }, [chatId]);
+
+  useEffect(() => {
     const q = query(collection(db, "chats", chatId, "messages"), orderBy("createdAt", "desc"), limit(300));
     const unsub = onSnapshot(q, (snap) => {
       setMessages(snap.docs.map(d => ({ id: d.id, ...d.data() })));
@@ -1077,7 +1135,8 @@ function ChatScreen({ ctx, chatId }) {
   useEffect(() => {
     if (!chat) return;
     if (unreadCount && AppState.currentState === "active") {
-      updateDoc(doc(db, "chats", chatId), { [`lastRead.${me.uid}`]: Date.now(), [`unread.${me.uid}`]: 0 }).catch(() => { });
+      updateDoc(doc(db, "chats", chatId), { [`lastRead.${me.uid}`]: Date.now(), [`unread.${me.uid}`]: 0 })
+        .then(() => bumpChat(chatId)).catch(() => { });
     }
   }, [unreadCount, messages.length]);
 
@@ -1101,7 +1160,7 @@ function ChatScreen({ ctx, chatId }) {
   const visible = messages.filter(m => !m.deleted && (!isForum || !topic || (m.topicId || "general") === topic.id));
 
   // ---------- операции ----------
-  const sendTo = async (targetChat, { textBody = "", image = null, sticker = null, voice = null, forwardedFrom = null }) => {
+  const sendTo = async (targetChat, { textBody = "", image = null, sticker = null, voice = null, poll = null, forwardedFrom = null }) => {
     const msg = {
       sender: me.uid, senderName: me.displayName || me.username,
       text: textBody.slice(0, 4000), image, createdAt: Date.now(), reactions: {},
@@ -1109,9 +1168,10 @@ function ChatScreen({ ctx, chatId }) {
     };
     if (sticker) msg.sticker = sticker;
     if (voice) msg.voice = voice;
+    if (poll) msg.poll = poll;
     if (forwardedFrom) msg.forwardedFrom = forwardedFrom;
     if (!forwardedFrom && targetChat.id === chatId && replyTo) msg.replyTo = { id: replyTo.id, sender: replyTo.senderName, text: replyTo.text ? replyTo.text.slice(0, 120) : "📷 Фото" };
-    const previewText = msg.text || (sticker ? "🧩 Стикер" : voice ? "🎤 Голосовое сообщение" : "");
+    const previewText = msg.text || (sticker ? "🧩 Стикер" : voice ? "🎤 Голосовое сообщение" : poll ? "📊 Опрос" : "");
     const patch = {
       lastMessage: { text: previewText, senderUid: me.uid, senderName: msg.senderName, createdAt: msg.createdAt, hasImage: !!image },
       [`lastRead.${me.uid}`]: msg.createdAt, [`unread.${me.uid}`]: 0, [`typing.${me.uid}`]: 0,
@@ -1121,12 +1181,14 @@ function ChatScreen({ ctx, chatId }) {
     batch.set(doc(collection(db, "chats", targetChat.id, "messages")), msg);
     batch.update(doc(db, "chats", targetChat.id), patch);
     await batch.commit();
+    bumpChat(targetChat.id);
   };
   const submit = async () => {
     const body = text.trim();
     if (!body || sendingRef.current) return;
     sendingRef.current = true;
     setText(""); // очищаем сразу — повторный тап не отправит то же самое
+    AsyncStorage.removeItem(`draft_${chatId}`).catch(() => { });
     try {
       if (editTarget) {
         await updateDoc(doc(db, "chats", chatId, "messages", editTarget.id), { text: body.slice(0, 4000), editedAt: Date.now() });
@@ -1152,6 +1214,8 @@ function ChatScreen({ ctx, chatId }) {
   };
   const onChangeText = (val) => {
     setText(val);
+    if (val.trim()) AsyncStorage.setItem(`draft_${chatId}`, val).catch(() => { });
+    else AsyncStorage.removeItem(`draft_${chatId}`).catch(() => { });
     const now = Date.now();
     if (now - lastTyping.current > 1800) {
       lastTyping.current = now;
@@ -1196,6 +1260,13 @@ function ChatScreen({ ctx, chatId }) {
       patch[`reactions.${emoji}`] = arrayUnion(me.uid);
     }
     await updateDoc(ref, patch).catch(() => { });
+  };
+  const votePoll = async (m, optionId) => {
+    const cur = m.poll?.votes?.[me.uid];
+    try {
+      await updateDoc(doc(db, "chats", chatId, "messages", m.id), { [`poll.votes.${me.uid}`]: cur === optionId ? deleteField() : optionId });
+      bumpChat(chatId);
+    } catch (e) { Alert.alert("Ошибка", ruError(e)); }
   };
   const deleteMsg = async (m) => {
     try {
@@ -1295,7 +1366,7 @@ function ChatScreen({ ctx, chatId }) {
       {/* header */}
       <View style={{ flexDirection: "row", alignItems: "center", paddingHorizontal: 10, paddingVertical: 8, gap: 10, backgroundColor: T.surface }}>
         <TouchableOpacity onPress={() => topic ? setTopic(null) : setScreen({ name: "list" })} style={{ padding: 6 }}>
-          <Text style={{ color: T.text, fontSize: 24 }}>‹</Text>
+          <MaterialIcons name="arrow-back" size={23} color={T.text} />
         </TouchableOpacity>
         <TouchableOpacity onPress={() => setInfoOpen(true)} style={{ flexDirection: "row", alignItems: "center", gap: 10, flex: 1 }}>
           <Avatar T={T} label={chat.type === "saved" ? "☆" : (v.title || "?")[0].toUpperCase()} color={v.avatarColor} size={40} photo={v.photo} />
@@ -1305,7 +1376,7 @@ function ChatScreen({ ctx, chatId }) {
           </View>
         </TouchableOpacity>
         <TouchableOpacity onPress={() => { setSearchOpen(x => !x); setSearchText(""); }} style={{ padding: 6 }}>
-          <Text style={{ color: T.text, fontSize: 18 }}>⌕</Text>
+          <MaterialIcons name="search" size={22} color={T.text} />
         </TouchableOpacity>
       </View>
 
@@ -1329,7 +1400,7 @@ function ChatScreen({ ctx, chatId }) {
           style={{ flexDirection: "row", alignItems: "center", gap: 8, backgroundColor: T.surface, paddingHorizontal: 14, paddingVertical: 8, borderBottomWidth: StyleSheet.hairlineWidth, borderColor: T.outline }}>
           <Text>📌</Text>
           <Text numberOfLines={1} style={{ color: T.text, flex: 1, fontSize: 13.5 }}>{pinnedMsg.senderName}: {pinnedMsg.text || "📷 Фото"}</Text>
-          <TouchableOpacity onPress={() => togglePin(pinnedMsg)}><Text style={{ color: T.muted, fontSize: 16 }}>✕</Text></TouchableOpacity>
+          <TouchableOpacity onPress={() => togglePin(pinnedMsg)}><MaterialIcons name="close" size={18} color={T.muted} /></TouchableOpacity>
         </TouchableOpacity>
       )}
 
@@ -1382,6 +1453,7 @@ function ChatScreen({ ctx, chatId }) {
                 onDoubleTap={() => toggleReaction(item.m, "❤️")}
                 onSwipeReply={() => { setEditTarget(null); setReplyTo(item.m); }}
                 onMention={openDmByName}
+                onVote={(m, o) => votePoll(m, o)}
                 onQuotePress={() => item.m.replyTo && scrollToMessage(item.m.replyTo.id)} />
             )}
             ListEmptyComponent={<View style={{ transform: [{ scaleY: -1 }], alignItems: "center", marginTop: 40 }}><Text style={{ color: T.muted }}>Пока пусто — напишите первое сообщение</Text></View>}
@@ -1393,21 +1465,21 @@ function ChatScreen({ ctx, chatId }) {
                 <Text numberOfLines={1} style={{ color: T.muted, fontSize: 13 }}>{(editTarget || replyTo).text || "📷 Фото"}</Text>
               </View>
               <TouchableOpacity onPress={() => { if (editTarget) setText(""); setReplyTo(null); setEditTarget(null); }}>
-                <Text style={{ color: T.muted, fontSize: 18 }}>✕</Text>
+                <MaterialIcons name="close" size={20} color={T.muted} />
               </TouchableOpacity>
             </View>
           )}
           {canWrite ? (
             <View style={{ flexDirection: "row", alignItems: "flex-end", padding: 8, gap: 4, backgroundColor: T.surface }}>
-              <TouchableOpacity onPress={() => setStickerOpen(true)} style={{ padding: 10 }}><Text style={{ fontSize: 20 }}>🙂</Text></TouchableOpacity>
-              <TouchableOpacity onPress={pickPhoto} style={{ padding: 10 }}><Text style={{ fontSize: 20 }}>📎</Text></TouchableOpacity>
+              <TouchableOpacity onPress={() => setStickerOpen(true)} style={{ padding: 10 }}><MaterialIcons name="emoji-emotions" size={23} color={T.muted} /></TouchableOpacity>
+              <TouchableOpacity onPress={() => setAttachOpen(true)} style={{ padding: 10 }}><MaterialIcons name="attach-file" size={23} color={T.muted} /></TouchableOpacity>
               <TextInput value={text} onChangeText={onChangeText} placeholder={recording ? "Идёт запись…" : "Сообщение"} placeholderTextColor={recording ? T.danger : T.muted} multiline
                 style={{ flex: 1, backgroundColor: T.surface2, color: T.text, borderRadius: 20, paddingHorizontal: 16, paddingVertical: 10, maxHeight: 120, fontSize: 16 }} />
               <TouchableOpacity onPress={toggleRec} style={{ padding: 10 }}>
-                <Text style={{ fontSize: 20 }}>{recording ? "⏹" : "🎤"}</Text>
+                <MaterialIcons name={recording ? "stop-circle" : "mic"} size={23} color={recording ? T.danger : T.muted} />
               </TouchableOpacity>
               <TouchableOpacity onPress={submit} style={{ width: 44, height: 44, borderRadius: 22, backgroundColor: T.inverse, alignItems: "center", justifyContent: "center" }}>
-                <Text style={{ color: T.onInverse, fontSize: 18 }}>{editTarget ? "✓" : "➤"}</Text>
+                <MaterialIcons name={editTarget ? "check" : "send"} size={20} color={T.onInverse} />
               </TouchableOpacity>
             </View>
           ) : (
@@ -1494,6 +1566,32 @@ function ChatScreen({ ctx, chatId }) {
         </Modal>
       )}
 
+      {attachOpen && (
+        <ActionSheet T={T} onClose={() => setAttachOpen(false)} items={[
+          { label: "📷  Фото", onPress: pickPhoto },
+          { label: "📊  Опрос", onPress: () => setPollOpen(true) },
+        ]} />
+      )}
+      {pollOpen && (
+        <PromptModal T={T} title="Новый опрос" submitLabel="Создать"
+          fields={[
+            { key: "q", placeholder: "Вопрос" },
+            { key: "o1", placeholder: "Вариант 1" },
+            { key: "o2", placeholder: "Вариант 2" },
+            { key: "o3", placeholder: "Вариант 3 (необязательно)" },
+            { key: "o4", placeholder: "Вариант 4 (необязательно)" },
+          ]}
+          onClose={() => setPollOpen(false)}
+          onSubmit={async (v) => {
+            const question = v.q.trim().slice(0, 120);
+            const options = [v.o1, v.o2, v.o3, v.o4].map(x => x.trim().slice(0, 60)).filter(Boolean)
+              .map(text => ({ id: randomId(8), text }));
+            if (!question || options.length < 2) return Alert.alert("", "Нужен вопрос и минимум 2 варианта");
+            try { await sendTo(chat, { poll: { question, options, votes: {} } }); listRef.current?.scrollToOffset({ offset: 0, animated: true }); }
+            catch (e) { Alert.alert("Ошибка", ruError(e)); }
+          }} />
+      )}
+
       {infoOpen && <ChatInfoSheet ctx={ctx} chat={chat} onClose={() => setInfoOpen(false)} />}
       {topicMenu && topicMenuItems(topicMenu).length > 0 && (
         <ActionSheet T={T} items={topicMenuItems(topicMenu)} onClose={() => setTopicMenu(null)}
@@ -1527,7 +1625,7 @@ function ChatScreen({ ctx, chatId }) {
 }
 
 // ---------- пузырь сообщения (свайп вправо = ответить) ----------
-function MessageBubble({ T, m, mine, group, lastReadByOthers, saved, onLongPress, onPhoto, onDoubleTap, onSwipeReply, onMention, onQuotePress }) {
+function MessageBubble({ T, m, mine, group, lastReadByOthers, saved, onLongPress, onPhoto, onDoubleTap, onSwipeReply, onMention, onQuotePress, onVote }) {
   const lastTap = useRef(0);
   const read = mine && lastReadByOthers >= m.createdAt;
   const pan = useRef(new Animated.Value(0)).current;
@@ -1568,6 +1666,31 @@ function MessageBubble({ T, m, mine, group, lastReadByOthers, saved, onLongPress
             </TouchableOpacity>
           )}
           {m.sticker && <Image source={{ uri: `${SITE}/stickers/${m.sticker}.png` }} style={{ width: 140, height: 140 }} />}
+          {m.poll && (
+            <View style={{ minWidth: 220, marginVertical: 4 }}>
+              <Text style={{ color: mine ? T.onInverse : T.text, fontWeight: "700", marginBottom: 8 }}>📊 {m.poll.question}</Text>
+              {(m.poll.options || []).map(o => {
+                const votes = m.poll.votes || {};
+                const total = Object.keys(votes).length;
+                const cnt = Object.values(votes).filter(x => x === o.id).length;
+                const pct = total ? Math.round(cnt / total * 100) : 0;
+                const my = votes && Object.entries(votes).some(([u, x]) => x === o.id && u === (m._meUid || ""));
+                return (
+                  <TouchableOpacity key={o.id} onPress={() => onVote && onVote(m, o.id)}
+                    style={{ borderWidth: 1, borderColor: mine ? T.onInverse : T.outline, borderRadius: 12, paddingVertical: 8, paddingHorizontal: 11, marginBottom: 6, overflow: "hidden" }}>
+                    <View style={{ position: "absolute", left: 0, top: 0, bottom: 0, width: `${pct}%`, backgroundColor: mine ? T.onInverse : T.text, opacity: 0.12 }} />
+                    <View style={{ flexDirection: "row", justifyContent: "space-between" }}>
+                      <Text style={{ color: mine ? T.onInverse : T.text, fontSize: 13.5, flex: 1 }}>{o.text}</Text>
+                      {total > 0 && <Text style={{ color: mine ? T.onInverse : T.text, fontSize: 12, fontWeight: "700", marginLeft: 8 }}>{pct}%</Text>}
+                    </View>
+                  </TouchableOpacity>
+                );
+              })}
+              <Text style={{ color: mine ? T.onInverse : T.muted, fontSize: 11, opacity: 0.7 }}>
+                {Object.keys(m.poll.votes || {}).length ? `Голосов: ${Object.keys(m.poll.votes).length}` : "Будьте первым — голосуйте!"}
+              </Text>
+            </View>
+          )}
           {m.voice && <VoiceBubble T={T} m={m} mine={mine} />}
           {!!m.text && (
             <MentionText text={m.text} onMention={onMention}
@@ -1619,7 +1742,7 @@ function VoiceBubble({ T, m, mine }) {
   return (
     <TouchableOpacity onPress={toggle} style={{ flexDirection: "row", alignItems: "center", gap: 10, paddingVertical: 6, minWidth: 160 }}>
       <View style={{ width: 38, height: 38, borderRadius: 19, backgroundColor: mine ? T.onInverse : T.inverse, alignItems: "center", justifyContent: "center" }}>
-        <Text style={{ color: mine ? T.inverse : T.onInverse, fontSize: 15 }}>{playing ? "⏸" : "▶"}</Text>
+        <MaterialIcons name={playing ? "pause" : "play-arrow"} size={20} color={mine ? T.inverse : T.onInverse} />
       </View>
       <View>
         <Text style={{ color: mine ? T.onInverse : T.text, fontWeight: "700", fontSize: 13.5 }}>Голосовое</Text>

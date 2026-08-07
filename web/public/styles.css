@@ -1,3 +1,8 @@
+/* ---------- Google Sans ---------- */
+@font-face { font-family: "Google Sans"; src: url("/fonts/GoogleSans-Regular.ttf") format("truetype"); font-weight: 400; font-display: swap; }
+@font-face { font-family: "Google Sans"; src: url("/fonts/GoogleSans-Medium.ttf") format("truetype"); font-weight: 500 600; font-display: swap; }
+@font-face { font-family: "Google Sans"; src: url("/fonts/GoogleSans-Bold.ttf") format("truetype"); font-weight: 700 800; font-display: swap; }
+
 /* DrigaGram — монохромный Material You */
 * { box-sizing: border-box; margin: 0; padding: 0; }
 
@@ -35,7 +40,7 @@
 
 html, body { height: 100%; }
 body {
-  font-family: "Segoe UI Variable Text", "Segoe UI", Roboto, system-ui, sans-serif;
+  font-family: "Google Sans", "Segoe UI", system-ui, sans-serif;
   background: var(--bg); color: var(--text);
   overflow: hidden;
   -webkit-tap-highlight-color: transparent;
@@ -457,3 +462,27 @@ input, textarea { font: inherit; color: inherit; background: none; border: 0; ou
   color: var(--text); font-weight: 700; font-size: 15px; transition: .2s;
 }
 .google-button:hover { border-color: var(--text-muted); }
+
+
+/* ---------- SVG-иконки ---------- */
+.icon-button svg, .send-button svg, .fab svg { display: block; }
+.icon-button, .send-button, .fab { display: grid; place-items: center; }
+.search-icon svg { display: block; opacity: .7; }
+
+/* ---------- опросы ---------- */
+.poll { min-width: 240px; margin: 4px 0; }
+.poll-q { font-weight: 700; margin-bottom: 8px; }
+.poll-option {
+  position: relative; display: flex; align-items: center; justify-content: space-between;
+  width: 100%; padding: 9px 12px; margin-bottom: 6px; overflow: hidden;
+  border: 1px solid var(--outline); border-radius: var(--radius-m);
+  color: inherit; font-size: 13.5px; text-align: left; background: transparent;
+}
+.poll-option .poll-bar {
+  position: absolute; left: 0; top: 0; bottom: 0;
+  background: currentColor; opacity: .12; transition: width .3s ease;
+}
+.poll-option .poll-label { position: relative; }
+.poll-option .poll-pct { position: relative; font-weight: 700; font-size: 12px; margin-left: 10px; }
+.poll-option.voted { border-color: currentColor; font-weight: 700; }
+.poll-total { font-size: 11.5px; opacity: .65; margin-top: 2px; }
