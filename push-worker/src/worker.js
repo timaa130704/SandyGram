@@ -214,30 +214,40 @@ async function customToken(env, uid) {
   return `${unsigned}.${b64url(sig)}`;
 }
 
+// CORS для браузера: QR-вход вызывается с веба (sandygram-a3b42.web.app) на workers.dev
+const CORS = {
+  "Access-Control-Allow-Origin": "*",
+  "Access-Control-Allow-Methods": "GET, POST, OPTIONS",
+  "Access-Control-Allow-Headers": "Content-Type",
+  "Access-Control-Max-Age": "86400",
+};
+const json = (body, status = 200) => Response.json(body, { status, headers: CORS });
+
 export default {
   async scheduled(event, env, ctx) {
     ctx.waitUntil(tick(env).then(r => console.log("tick:", JSON.stringify(r))).catch(e => console.error("tick error:", String(e))));
   },
   async fetch(request, env) {
-    // ручной прогон для отладки: GET /run?key=<PING_KEY>
+    // preflight (браузер, cross-origin POST с Content-Type: application/json)
+    if (request.method === "OPTIONS") return new Response(null, { status: 204, headers: CORS });
     const url = new URL(request.url);
     if (url.pathname === "/run" && url.searchParams.get("key") === env.PING_KEY) {
-      try { return Response.json(await tick(env)); }
-      catch (e) { return Response.json({ error: String(e) }, { status: 500 }); }
+      try { return json(await tick(env)); }
+      catch (e) { return json({ error: String(e) }, 500); }
     }
     // QR-вход: POST {"refreshToken": "..."} -> {"token": "<Firebase Custom Token>"}
     if (request.method === "POST" && url.pathname === "/qr/exchange") {
       try {
         const body = await request.json();
         const refreshToken = String(body?.refreshToken || "").trim();
-        if (!refreshToken) return Response.json({ error: "refreshToken required" }, { status: 400 });
+        if (!refreshToken) return json({ error: "refreshToken required" }, 400);
         const uid = await uidByRefreshToken(refreshToken);
         const token = await customToken(env, uid);
-        return Response.json({ token });
+        return json({ token });
       } catch (e) {
-        return Response.json({ error: String(e) }, { status: 500 });
+        return json({ error: String(e) }, 500);
       }
     }
-    return new Response("SandyGram push worker", { status: 200 });
+    return new Response("SandyGram push worker", { status: 200, headers: CORS });
   },
 };
