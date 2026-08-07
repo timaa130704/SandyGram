@@ -744,7 +744,7 @@ public partial class MainWindow : Window
         {
             ["lastRead"] = new Dictionary<string, object?> { [Fire.Uid] = now },
             ["unread"] = new Dictionary<string, object?> { [Fire.Uid] = 0L },
-        }, new[] { $"lastRead.{Fire.Uid}", $"unread.{Fire.Uid}" });
+        }, new[] { $"lastRead.{Bq(Fire.Uid)}", $"unread.{Bq(Fire.Uid)}" });
         _ = BumpAsync(chatId); // мгновенные галочки у собеседника
     }
 
@@ -1142,7 +1142,7 @@ public partial class MainWindow : Window
         });
         var transforms = members.Where(mb => mb != Fire.Uid).Select(mb => new
         {
-            fieldPath = $"unread.{mb}",
+            fieldPath = $"unread.{Bq(mb)}",
             increment = new { integerValue = "1" },
         }).ToArray();
         var writes = new List<object>
@@ -1155,7 +1155,7 @@ public partial class MainWindow : Window
             new
             {
                 update = new { name = Fire.DocName($"chats/{currentChatId}"), fields = chatUpdateFields },
-                updateMask = new { fieldPaths = new[] { "lastMessage", $"lastRead.{Fire.Uid}", $"unread.{Fire.Uid}" } },
+                updateMask = new { fieldPaths = new[] { "lastMessage", $"lastRead.{Bq(Fire.Uid)}", $"unread.{Bq(Fire.Uid)}" } },
                 updateTransforms = transforms,
             },
         };
@@ -1318,7 +1318,7 @@ public partial class MainWindow : Window
             ["lastRead"] = new Dictionary<string, object?> { [Fire.Uid] = now },
             ["unread"] = new Dictionary<string, object?> { [Fire.Uid] = 0L },
         };
-        var mask = new List<string> { "lastMessage", $"lastRead.{Fire.Uid}", $"unread.{Fire.Uid}" };
+        var mask = new List<string> { "lastMessage", $"lastRead.{Bq(Fire.Uid)}", $"unread.{Bq(Fire.Uid)}" };
         if (mutesChanged) { chatPatch["mutes"] = AsObj(mutes); mask.Add("mutes"); }
         if (bansChanged) { chatPatch["bans"] = AsObj(bans); mask.Add("bans"); }
         if (warnsChanged) { chatPatch["warns"] = AsObj(warns); mask.Add("warns"); }
@@ -1327,7 +1327,7 @@ public partial class MainWindow : Window
 
         var transforms = membersList.Where(mb => mb != Fire.Uid).Select(mb => new
         {
-            fieldPath = $"unread.{mb}",
+            fieldPath = $"unread.{Bq(mb)}",
             increment = new { integerValue = "1" },
         }).ToArray();
 
@@ -1600,7 +1600,7 @@ public partial class MainWindow : Window
             });
             var transforms = members.Where(mb => mb != Fire.Uid).Select(mb => new
             {
-                fieldPath = $"unread.{mb}",
+                fieldPath = $"unread.{Bq(mb)}",
                 increment = new { integerValue = "1" },
             }).ToArray();
 
@@ -1614,7 +1614,7 @@ public partial class MainWindow : Window
                 new
                 {
                     update = new { name = Fire.DocName($"chats/{currentChatId}"), fields = chatUpdateFields },
-                    updateMask = new { fieldPaths = new[] { "lastMessage", $"lastRead.{Fire.Uid}", $"unread.{Fire.Uid}" } },
+                    updateMask = new { fieldPaths = new[] { "lastMessage", $"lastRead.{Bq(Fire.Uid)}", $"unread.{Bq(Fire.Uid)}" } },
                     updateTransforms = transforms,
                 },
             };
