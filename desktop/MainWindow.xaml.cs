@@ -37,6 +37,9 @@ public partial class MainWindow : Window
     readonly Dictionary<string, string> drafts = new();
     string currentTopicId = "";            // "" = обычный чат; для форумов id открытого топика
     (string Id, string Sender, string Text)? replyTo = null;
+    string replyTargetUid = "";            // uid автора, на чьё сообщение отвечают (для /mute и т.п.)
+    static readonly System.Text.RegularExpressions.Regex ModCmdRe = new(@"^/(mute|warn|ban|unmute|unban)\b", System.Text.RegularExpressions.RegexOptions.IgnoreCase);
+    const long PermanentUntil = 4102444800000L; // ~2100 год: «навсегда»
     NAudio.Wave.WaveInEvent? recorder;
     NAudio.Wave.WaveFileWriter? recWriter;
     string recPath = "";
@@ -705,10 +708,12 @@ public partial class MainWindow : Window
         MsgInput.Text = drafts.TryGetValue(chatId, out var d) ? d : "";
         currentTopicId = "";
         TopicBackBtn.Visibility = Visibility.Collapsed;
-        replyTo = null; ReplyBar.Visibility = Visibility.Collapsed;
+        replyTo = null; replyTargetUid = ""; ReplyBar.Visibility = Visibility.Collapsed;
         currentChatId = chatId;
         lastMsgSignature = ""; lastListSignature = "";
         loadedMsgs.Clear(); lastMaxCreated = 0;
+        MentionBox.Visibility = Visibility.Collapsed;
+        _ = LoadMentionPoolAsync();
         MsgList.Children.Clear();
         if (!chats.TryGetValue(chatId, out var f)) return;
         var (title, letter, tone, photo, sub) = await ChatViewAsync(chatId, f);
@@ -1025,6 +1030,7 @@ public partial class MainWindow : Window
         miReply.Click += (_, _) =>
         {
             replyTo = (msgId2, senderName, msgText.Length > 120 ? msgText[..120] : (msgText.Length > 0 ? msgText : "📷 Фото"));
+            replyTargetUid = Fire.FStr(m, "sender");
             ReplyTitle.Text = "Ответ: " + senderName;
             ReplyText.Text = replyTo.Value.Text;
             ReplyBar.Visibility = Visibility.Visible;
@@ -1154,15 +1160,208 @@ public partial class MainWindow : Window
             },
         };
         await Fire.CommitAsync(writes.ToArray());
-        replyTo = null;
+        replyTo = null; replyTargetUid = "";
         ReplyBar.Visibility = Visibility.Collapsed;
         _ = BumpAsync(currentChatId);
         await PollMessagesAsync();
     }
 
+    // ---------- модерация: /mute /warn /ban ----------
+    async Task<HashSet<string>> ComputeMentionsAsync(List<string?> members, string text)
+    {
+        var set = new HashSet<string>();
+        var uname = new System.Collections.Generic.Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
+        foreach (var uid in members)
+        {
+            if (string.IsNullOrEmpty(uid)) continue;
+            if (uid == Fire.Uid) continue;
+            var u = await GetUserCachedAsync(uid);
+            if (u == null) continue;
+            var username = Fire.FStr(u, "username");
+            if (username.Length > 0) uname[username] = uid;
+        }
+        var re = new System.Text.RegularExpressions.Regex(@"@([a-z0-9_]{3,24})\b", System.Text.RegularExpressions.RegexOptions.IgnoreCase);
+        foreach (System.Text.RegularExpressions.Match mm in re.Matches(text))
+        {
+            var n = mm.Groups[1].Value.ToLowerInvariant();
+            if (uname.TryGetValue(n, out var uid)) set.Add(uid);
+        }
+        return set;
+    }
+
+    long ParseModDuration(string s)
+    {
+        var t = (s ?? "").Trim().ToLowerInvariant();
+        if (t.Length == 0) return -1; // не указано → дефолт
+        if (t is "0" or "off" or "нет" or "снять") return 0;
+        var rm = System.Text.RegularExpressions.Regex.Match(t, @"^(\d+)\s*([а-яa-z]+)?$");
+        if (!rm.Success || !long.TryParse(rm.Groups[1].Value, out var n) || n <= 0) return -2; // не понял
+        var u = rm.Groups[2].Value;
+        long per = u switch
+        {
+            "с" or "сек" => 1000,
+            "" or "м" or "мин" => 60000,
+            "ч" or "час" => 3600000,
+            "д" or "день" or "дня" or "дней" => 86400000,
+            "мес" => 30L * 86400000,
+            _ => 60000,
+        };
+        return n * per;
+    }
+    static string FmtModUntil(long ts) => ts >= PermanentUntil ? "навсегда" : DateTimeOffset.FromUnixTimeMilliseconds(ts).ToLocalTime().ToString("dd.MM HH:mm");
+    static Dictionary<string, object?> AsObj(Dictionary<string, object?> d) => d;
+
+    async Task RunModAsync(string raw)
+    {
+        var f = chats[currentChatId];
+        var type = Fire.FStr(f, "type");
+        if (type != "group" && type != "channel") { MessageBox.Show("Команда доступна только в группах/каналах", "SandyGram"); return; }
+        bool isAdmin = (Fire.FStr(f, "ownerUid") == Fire.Uid) || Fire.FList(f, "admins").Contains(Fire.Uid);
+        if (!isAdmin) { MessageBox.Show("Модерировать — только админ или создатель", "SandyGram"); return; }
+        var m = System.Text.RegularExpressions.Regex.Match(raw, @"^/(mute|warn|ban|unmute|unban)(?:\s+(.*))?$", System.Text.RegularExpressions.RegexOptions.IgnoreCase);
+        if (!m.Success) return;
+        var cmd = m.Groups[1].Value.ToLowerInvariant();
+        var tokens = (m.Groups[2].Value.Trim().Split(new[] { ' ', '\t' }, StringSplitOptions.RemoveEmptyEntries)).ToList();
+
+        var members = Fire.FList(f, "members").Select(x => x as string).Where(x => !string.IsNullOrEmpty(x)).ToList();
+        var admins = Fire.FList(f, "admins").Select(x => x as string).Where(x => !string.IsNullOrEmpty(x)).ToList();
+        var uname = new System.Collections.Generic.Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
+        foreach (var uid in members)
+        {
+            if (uid == Fire.Uid) continue;
+            var u = await GetUserCachedAsync(uid);
+            var username = u == null ? "" : Fire.FStr(u, "username");
+            if (username.Length > 0) uname[username] = uid;
+        }
+
+        string targetUid = "", targetName = "", timeStr = "";
+        if (tokens.Count > 0 && tokens[0].StartsWith("@"))
+        {
+            if (uname.TryGetValue(tokens[0][1..].ToLowerInvariant(), out var u0)) targetUid = u0;
+            targetName = tokens[0];
+            if (tokens.Count > 1) timeStr = tokens[1];
+        }
+        else if (replyTo != null && tokens.Count == 0) { targetUid = replyTargetUid; targetName = replyTo.Value.Sender; }
+        else if (replyTo != null && tokens.Count > 0) { targetUid = replyTargetUid; targetName = replyTo.Value.Sender; timeStr = tokens[0]; }
+        else if (tokens.Count > 0)
+        {
+            if (uname.TryGetValue(tokens[0].Replace("@", "").ToLowerInvariant(), out var u1)) targetUid = u1;
+            targetName = tokens[0].StartsWith("@") ? tokens[0] : "@" + tokens[0];
+            if (tokens.Count > 1) timeStr = tokens[1];
+        }
+        if (targetUid.Length == 0) { MessageBox.Show("Укажите @имя или ответьте на сообщение", "SandyGram"); return; }
+        if (targetUid == Fire.Uid) { MessageBox.Show("Нельзя модерировать себя", "SandyGram"); return; }
+        var targetRole = Fire.FStr(f, "ownerUid") == targetUid ? "owner" : (admins.Contains(targetUid) ? "admin" : "member");
+        if (targetRole == "owner") { MessageBox.Show("Владельца нельзя модерировать", "SandyGram"); return; }
+        if (targetRole == "admin" && Fire.FStr(f, "ownerUid") != Fire.Uid) { MessageBox.Show("Админа может модерировать только создатель", "SandyGram"); return; }
+        if (cmd is not ("unban" or "unmute") && !members.Contains(targetUid)) { MessageBox.Show("Пользователя нет в чате", "SandyGram"); return; }
+
+        long dur = timeStr.Length > 0 ? ParseModDuration(timeStr) : (cmd == "warn" ? 1800000L : (cmd == "ban" ? 86400000L : 3600000L));
+        if (dur < 0) { MessageBox.Show("Не понял время. Пример: /mute @имя 2ч или 30м", "SandyGram"); return; }
+
+        var mutes = Fire.FMap(f, "mutes");
+        var bans = Fire.FMap(f, "bans");
+        var warns = Fire.FMap(f, "warns");
+        var membersList = members.ToList();
+        bool mutesChanged = false, bansChanged = false, warnsChanged = false, membersChanged = false;
+
+        if (cmd == "unmute" || (cmd == "mute" && dur == 0)) { mutes.Remove(targetUid); mutesChanged = true; }
+        else if (cmd == "mute") { mutes[targetUid] = DateTimeOffset.UtcNow.ToUnixTimeMilliseconds() + dur; mutesChanged = true; }
+        else if (cmd == "warn")
+        {
+            mutes[targetUid] = DateTimeOffset.UtcNow.ToUnixTimeMilliseconds() + dur; mutesChanged = true;
+            warns[targetUid] = (warns.TryGetValue(targetUid, out var wv) ? Convert.ToInt64(wv) : 0) + 1; warnsChanged = true;
+        }
+        if (cmd == "unban" || (cmd == "ban" && dur == 0))
+        {
+            if (!membersList.Contains(targetUid)) { membersList.Add(targetUid); membersChanged = true; }
+            bans.Remove(targetUid); bansChanged = true;
+        }
+        else if (cmd == "ban")
+        {
+            bans[targetUid] = DateTimeOffset.UtcNow.ToUnixTimeMilliseconds() + dur; bansChanged = true;
+            membersList.Remove(targetUid); membersChanged = true;
+            admins.Remove(targetUid);
+        }
+
+        var now = DateTimeOffset.UtcNow.ToUnixTimeMilliseconds();
+        string noticeText = cmd switch
+        {
+            "unmute" => $"🔔 {(myDisplayName.Length > 0 ? myDisplayName : myUsername)} снял(а) мут с {targetName}",
+            "unban" => $"🚪 {(myDisplayName.Length > 0 ? myDisplayName : myUsername)} снял(а) бан с {targetName}",
+            "ban" when dur == 0 => $"🚪 {(myDisplayName.Length > 0 ? myDisplayName : myUsername)} снял(а) бан с {targetName}",
+            "mute" when dur == 0 => $"🔔 {(myDisplayName.Length > 0 ? myDisplayName : myUsername)} снял(а) мут с {targetName}",
+            "mute" => $"🔕 {(myDisplayName.Length > 0 ? myDisplayName : myUsername)} замутил(а) {targetName} до {FmtModUntil(now + dur)}",
+            "warn" => $"⚠️ {(myDisplayName.Length > 0 ? myDisplayName : myUsername)} выдал(а) варн {targetName} и замутил(а) до {FmtModUntil(now + dur)}",
+            "ban" => $"🚫 {(myDisplayName.Length > 0 ? myDisplayName : myUsername)} забанил(а) {targetName} до {FmtModUntil(now + dur)}",
+            _ => "",
+        };
+
+        // заметка в чат (пузырь-уведомление)
+        var notice = new Dictionary<string, object?>
+        {
+            ["sender"] = Fire.Uid, ["senderName"] = myDisplayName.Length > 0 ? myDisplayName : myUsername,
+            ["text"] = noticeText, ["notice"] = true, ["createdAt"] = now,
+            ["reactions"] = new Dictionary<string, object?>(), ["topicId"] = "general",
+        };
+        var msgId = Fire.RandomId();
+
+        // патч чата: моды + последнее сообщение + прочтение + непрочитанные
+        var chatPatch = new Dictionary<string, object?>
+        {
+            ["lastMessage"] = new Dictionary<string, object?>
+            {
+                ["text"] = noticeText, ["senderUid"] = Fire.Uid,
+                ["senderName"] = myDisplayName.Length > 0 ? myDisplayName : myUsername,
+                ["createdAt"] = now, ["hasImage"] = false,
+            },
+            ["lastRead"] = new Dictionary<string, object?> { [Fire.Uid] = now },
+            ["unread"] = new Dictionary<string, object?> { [Fire.Uid] = 0L },
+        };
+        var mask = new List<string> { "lastMessage", $"lastRead.{Fire.Uid}", $"unread.{Fire.Uid}" };
+        if (mutesChanged) { chatPatch["mutes"] = AsObj(mutes); mask.Add("mutes"); }
+        if (bansChanged) { chatPatch["bans"] = AsObj(bans); mask.Add("bans"); }
+        if (warnsChanged) { chatPatch["warns"] = AsObj(warns); mask.Add("warns"); }
+        if (membersChanged) { chatPatch["members"] = membersList; mask.Add("members"); }
+        if (cmd == "ban") { chatPatch["admins"] = admins; mask.Add("admins"); }
+
+        var transforms = membersList.Where(mb => mb != Fire.Uid).Select(mb => new
+        {
+            fieldPath = $"unread.{mb}",
+            increment = new { integerValue = "1" },
+        }).ToArray();
+
+        var writes = new object[]
+        {
+            new
+            {
+                update = new { name = Fire.DocName($"chats/{currentChatId}/messages/{msgId}"), fields = Fire.ToFsFields(notice) },
+                currentDocument = new { exists = false },
+            },
+            new
+            {
+                update = new { name = Fire.DocName($"chats/{currentChatId}"), fields = Fire.ToFsFields(chatPatch) },
+                updateMask = new { fieldPaths = mask.ToArray() },
+                updateTransforms = transforms,
+            },
+        };
+        try
+        {
+            await Fire.CommitAsync(writes);
+            replyTo = null; replyTargetUid = "";
+            ReplyBar.Visibility = Visibility.Collapsed;
+            _ = BumpAsync(currentChatId);
+            await PollMessagesAsync();
+        }
+        catch (Exception ex)
+        {
+            MessageBox.Show(ex.Message.Contains("PERMISSION") ? "Нет прав на это действие" : ex.Message, "SandyGram");
+        }
+    }
+
     void CancelReply_Click(object sender, RoutedEventArgs e)
     {
-        replyTo = null;
+        replyTo = null; replyTargetUid = "";
         ReplyBar.Visibility = Visibility.Collapsed;
     }
 
@@ -1288,15 +1487,82 @@ public partial class MainWindow : Window
     // ================================================================ отправка
     void MsgInput_KeyDown(object sender, KeyEventArgs e)
     {
+        if (MentionBox.Visibility == Visibility.Visible)
+        {
+            if (e.Key == Key.Up) { e.Handled = true; MoveMention(-1); return; }
+            if (e.Key == Key.Down) { e.Handled = true; MoveMention(1); return; }
+            if (e.Key == Key.Enter || e.Key == Key.Tab) { e.Handled = true; InsertMentionSelected(); return; }
+            if (e.Key == Key.Escape) { e.Handled = true; MentionBox.Visibility = Visibility.Collapsed; return; }
+        }
         if (e.Key == Key.Enter) { e.Handled = true; SendBtn_Click(sender, e); }
+    }
+
+    // ---------- @-пикер упоминаний (десктоп) ----------
+    readonly List<(string Username, string DisplayName, string Uid)> mentionPool = new();
+    async Task LoadMentionPoolAsync()
+    {
+        mentionPool.Clear();
+        if (!chats.TryGetValue(currentChatId, out var f)) return;
+        foreach (var uid in Fire.FList(f, "members").Select(x => x as string).Where(x => !string.IsNullOrEmpty(x)))
+        {
+            if (uid == Fire.Uid) continue;
+            var u = await GetUserCachedAsync(uid);
+            if (u == null) continue;
+            var uname = Fire.FStr(u, "username"); var dname = Fire.FStr(u, "displayName");
+            if (uname.Length > 0) mentionPool.Add((uname, dname, uid));
+        }
+    }
+    void MsgInput_TextChanged(object sender, TextChangedEventArgs e)
+    {
+        if (string.IsNullOrEmpty(currentChatId)) return;
+        var val = MsgInput.Text;
+        var sel = Math.Min(MsgInput.CaretIndex, val.Length);
+        var m = System.Text.RegularExpressions.Regex.Match(val[..sel], @"(?:^|[\s(])@([a-z0-9_]*)$", System.Text.RegularExpressions.RegexOptions.IgnoreCase);
+        if (!m.Success || m.Groups[1].Value.Length == 0) { MentionBox.Visibility = Visibility.Collapsed; return; }
+        var q = m.Groups[1].Value.ToLowerInvariant();
+        var hits = mentionPool.Where(p => p.Username.ToLowerInvariant().StartsWith(q)).Take(8).ToList();
+        if (hits.Count == 0) { MentionBox.Visibility = Visibility.Collapsed; return; }
+        MentionList.Items.Clear();
+        foreach (var h in hits)
+            MentionList.Items.Add(h.Username + (h.DisplayName.Length > 0 && h.DisplayName != h.Username ? $"  ·  {h.DisplayName}" : ""));
+        MentionList.SelectedIndex = 0;
+        MentionBox.Visibility = Visibility.Visible;
+    }
+    void MoveMention(int dir)
+    {
+        var n = MentionList.Items.Count;
+        if (n == 0) return;
+        MentionList.SelectedIndex = (MentionList.SelectedIndex + dir + n) % n;
+    }
+    void InsertMentionSelected()
+    {
+        if (MentionList.SelectedItem is not string chosen) { MentionBox.Visibility = Visibility.Collapsed; return; }
+        var uname = chosen.Split("  ·  ")[0];
+        var val = MsgInput.Text;
+        var sel = Math.Min(MsgInput.CaretIndex, val.Length);
+        var m = System.Text.RegularExpressions.Regex.Match(val[..sel], @"(?:^|[\s(])@([a-z0-9_]*)$", System.Text.RegularExpressions.RegexOptions.IgnoreCase);
+        string nv; int caret;
+        if (m.Success)
+        {
+            var start = m.Groups[0].Index + m.Groups[0].Value.LastIndexOf('@');
+            nv = val[..start] + "@" + uname + " " + val[sel..];
+            caret = start + uname.Length + 2;
+        }
+        else { nv = MsgInput.Text.TrimEnd() + " @" + uname + " "; caret = nv.Length; }
+        MsgInput.Text = nv;
+        MsgInput.CaretIndex = Math.Min(caret, nv.Length);
+        MentionBox.Visibility = Visibility.Collapsed;
+        MsgInput.Focus();
     }
 
     async void SendBtn_Click(object sender, RoutedEventArgs e)
     {
-        if (sending || string.IsNullOrEmpty(currentChatId)) return;
+        if (string.IsNullOrEmpty(currentChatId)) return;
         var text = MsgInput.Text.Trim();
         if (text.Length == 0) return;
         if (!chats.TryGetValue(currentChatId, out var f)) return;
+        if (ModCmdRe.IsMatch(text)) { MsgInput.Text = ""; drafts.Remove(currentChatId); await RunModAsync(text); MsgInput.Focus(); return; }
+        if (sending) return;
         sending = true;
         MsgInput.Text = ""; // мгновенно, защита от спама
         drafts.Remove(currentChatId);
@@ -1305,8 +1571,7 @@ public partial class MainWindow : Window
             var now = DateTimeOffset.UtcNow.ToUnixTimeMilliseconds();
             var msgId = Fire.RandomId();
             var members = Fire.FList(f, "members").Select(m => m as string).Where(m => m != null).ToList();
-            // форум: с десктопа пишем в «Общий»
-            var msgFields = Fire.ToFsFields(new()
+            var msg = new Dictionary<string, object?>
             {
                 ["sender"] = Fire.Uid,
                 ["senderName"] = myDisplayName.Length > 0 ? myDisplayName : myUsername,
@@ -1315,7 +1580,11 @@ public partial class MainWindow : Window
                 ["createdAt"] = now,
                 ["reactions"] = new Dictionary<string, object?>(),
                 ["topicId"] = "general",
-            });
+            };
+            // @упоминания → массив uid
+            var mentionUid = await ComputeMentionsAsync(members, text);
+            if (mentionUid.Count > 0) msg["mentions"] = mentionUid.ToList();
+            var msgFields = Fire.ToFsFields(msg);
             var chatUpdateFields = Fire.ToFsFields(new()
             {
                 ["lastMessage"] = new Dictionary<string, object?>

@@ -299,6 +299,9 @@
                 <Button Grid.Column="1" Style="{StaticResource IconBtn}" Width="26" Height="26" Content="✕" FontSize="12" Click="CancelReply_Click"/>
               </Grid>
             </Border>
+            <Border x:Name="MentionBox" Background="{StaticResource Surface2}" CornerRadius="12" Padding="4" Margin="0,0,0,8" Visibility="Collapsed" MaxHeight="168">
+              <ListBox x:Name="MentionList" Background="Transparent" BorderThickness="0" FontSize="13" Foreground="{StaticResource Text}" ScrollViewer.HorizontalScrollBarVisibility="Disabled"/>
+            </Border>
           <Grid>
             <Grid.ColumnDefinitions>
               <ColumnDefinition Width="Auto"/>
@@ -310,7 +313,7 @@
             <Button x:Name="StickerBtn" Grid.Column="0" Style="{StaticResource IconBtn}" Content="☺" FontSize="18" ToolTip="Стикеры" Click="StickerBtn_Click" Margin="0,0,4,0"/>
             <Button x:Name="AttachBtn" Grid.Column="1" Style="{StaticResource IconBtn}" Content="🖼" FontSize="15" ToolTip="Фото" Click="AttachBtn_Click" Margin="0,0,6,0"/>
             <TextBox x:Name="MsgInput" Grid.Column="2" Style="{StaticResource Input}" FontSize="14" Height="44"
-                     AcceptsReturn="False" KeyDown="MsgInput_KeyDown" Tag="Сообщение"/>
+                     AcceptsReturn="False" KeyDown="MsgInput_KeyDown" TextChanged="MsgInput_TextChanged" Tag="Сообщение"/>
             <Button x:Name="MicBtn" Grid.Column="3" Style="{StaticResource IconBtn}" Content="🎙" FontSize="15" ToolTip="Голосовое" Click="MicBtn_Click" Margin="6,0,0,0"/>
             <Button x:Name="SendBtn" Grid.Column="4" Width="44" Height="44" Margin="8,0,0,0"
                     Cursor="Hand" BorderThickness="0" Click="SendBtn_Click">

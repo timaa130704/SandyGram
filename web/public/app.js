@@ -39,6 +39,9 @@ const peerUnsubs = new Map();      // uid -> unsub (профили собесе�
 const userCache = new Map();       // uid -> профиль
 let lastTypingSent = 0;
 let heartbeatTimer = null;
+let mentionPool = [];     // участники открытого чата для @-пикера
+let mentionMatch = "";    // текущий набранный @префикс
+let lastMentionAt = 0;    // последнее уведомление об @упоминании
 
 const EMOJI = "😀 😃 😄 😁 😆 😅 😂 🙂 🙃 😉 😊 😍 🥰 😘 😎 🤓 🤔 😐 😶 🙄 😏 😮 😪 🥱 😴 😌 😋 😜 🤪 🤗 🤭 🤫 😱 😨 😭 😤 😡 🤯 😳 🥳 🤩 🥺 🤢 🤧 😷 🤑 👋 ✋ 🤝 👍 👎 👌 ✌️ 🤞 🙏 💪 👀 ❤️ 🖤 🤍 💔 💯 🔥 ⭐ ✨ 🎉 🎁 🎯 🚀 ⚡ ☕ 🍕 🌙 ☀️".split(" ");
 const QUICK_REACTIONS = ["❤️", "👍", "🔥", "😂", "😮", "😢"];
@@ -89,6 +92,30 @@ function formatLastSeen(u) {
   return `был(а) ${new Date(u.lastSeen).toLocaleDateString([], { day: "2-digit", month: "2-digit" })}`;
 }
 const emailFor = (username) => `${username}@sandygram.app`;
+
+// ---------- модерация /длительности ----------
+function parseDuration(s) {
+  s = (s || "").trim().toLowerCase();
+  if (!s) return null;
+  if (/^(off|0|нет|снять)$/.test(s)) return 0;
+  if (/^\d+$/.test(s)) return parseInt(s, 10) * 60e3; // голое число = минуты
+  const m = s.match(/^(\d+(?:\.\d+)?)\s*(s|m|h|d|w)$/);
+  if (!m) return null;
+  const mult = { s: 1e3, m: 60e3, h: 3600e3, d: 864e5, w: 6048e5 }[m[2]];
+  return Math.round(parseFloat(m[1]) * mult);
+}
+function fmtDuration(ms) {
+  if (!ms) return "навсегда";
+  const h = ms / 3600e3;
+  if (h < 1) return `${Math.max(1, Math.round(ms / 60e3))} мин`;
+  if (h < 24) return `${Math.round(h * 10) / 10} ч`;
+  return `${Math.round(h / 24 * 10) / 10} д`;
+}
+function fmtUntil(ms) {
+  if (!ms) return "навсегда";
+  const d = new Date(ms);
+  return `${d.toLocaleDateString("ru", { day: "numeric", month: "short" })} ${d.getHours()}:${String(d.getMinutes()).padStart(2, "0")}`;
+}
 // Аватар: фото, если есть, иначе буква
 function avatarHtml(color, letter, photo, cls = "avatar") {
   const inner = photo ? `<img src="${escapeHtml(photo)}" alt="" />` : escapeHtml(letter);
@@ -785,7 +812,70 @@ async function openChat(chatId) {
   renderConversationHeader();
   renderChatList();
   subscribeMessages(chatId);
+  loadMentionPool();
 }
+
+// ---------- @-пикер упоминаний ----------
+let mentionIdx = 0;
+let lastMentionAck = 0;
+function notifyMention(m) {
+  const who = m.senderName || "Кто-то";
+  const body = m.text || "📷 Фото";
+  if (!document.hidden && "Notification" in window && Notification.permission === "granted") {
+    try { new Notification(`${who} упомянул(а) вас`, { body: body.slice(0, 120), tag: `mention-${m.id || m.createdAt}` }); } catch (e) {}
+  }
+  toast(`${who} упомянул(а) вас: ${body.slice(0, 60)}`);
+}
+async function loadMentionPool() {
+  const chat = currentChat();
+  const members = (chat?.members || []).filter(id => id !== me.uid);
+  mentionPool = (await Promise.all(members.map(fetchUser))).filter(Boolean);
+  mentionMatch = "";
+}
+function markMentionSel() {
+  const opts = document.querySelectorAll("#mentionPanel .mention-option");
+  opts.forEach((o, i) => o.classList.toggle("selected", i === mentionIdx));
+}
+function updateMentionPicker() {
+  const el = $("#mentionPanel");
+  if (!el) return;
+  const val = messageInput.value;
+  const sel = messageInput.selectionStart ?? val.length;
+  const m = /(?:^|[\s(])@([a-z0-9_]*)$/.exec(val.slice(0, sel));
+  if (!m) { mentionMatch = ""; el.classList.add("hidden"); return; }
+  const q = m[1].toLowerCase();
+  const list = mentionPool.filter(u => (u.username || "").toLowerCase().startsWith(q));
+  if (!list.length || !q) { mentionMatch = ""; el.classList.add("hidden"); return; }
+  mentionMatch = q; mentionIdx = 0;
+  el.replaceChildren();
+  list.slice(0, 8).forEach((u, i) => {
+    const b = document.createElement("button");
+    b.type = "button";
+    b.className = "mention-option" + (i === 0 ? " selected" : "");
+    b._u = u;
+    b.innerHTML = `${avatarHtml(u.avatarColor, (u.displayName || "?")[0].toUpperCase(), u.avatar, "avatar sm")}<span class="mname"><strong>${escapeHtml(u.displayName)}</strong><small>@${escapeHtml(u.username)}</small></span>`;
+    b.addEventListener("click", () => replaceMention(u));
+    el.appendChild(b);
+  });
+  el.classList.remove("hidden");
+}
+function replaceMention(u) {
+  const el = $("#mentionPanel"); if (el) el.classList.add("hidden");
+  const val = messageInput.value;
+  const sel = messageInput.selectionStart ?? val.length;
+  const m = /(?:^|[\s(])@([a-z0-9_]*)$/.exec(val.slice(0, sel));
+  let newVal, caret;
+  if (m) {
+    const atIdx = m[0].lastIndexOf("@");
+    const start = sel - m[0].length + atIdx;
+    newVal = val.slice(0, start) + `@${u.username} ` + val.slice(sel);
+    caret = start + u.username.length + 2;
+  } else { newVal = val + `@${u.username} `; caret = newVal.length; }
+  messageInput.value = newVal; autoGrow(messageInput);
+  messageInput.setSelectionRange(caret, caret);
+  messageInput.focus();
+}
+document.addEventListener("click", (e) => { if (currentChatId && !e.target.closest("#mentionPanel")) { const el = $("#mentionPanel"); if (el) el.classList.add("hidden"); } });
 function subscribeMessages(chatId) {
   messagesUnsub?.();
   messages = [];
@@ -796,6 +886,11 @@ function subscribeMessages(chatId) {
     messages = snap.docs.map(d => ({ id: d.id, ...d.data() })).reverse();
     const chat = currentChat();
     if (!chat) return;
+    const myMention = lastMentionAck ? messages.find(m => (m.mentions || []).includes(me.uid) && m.sender !== me.uid && (m.createdAt || 0) > lastMentionAck) : null;
+    if (myMention) {
+      lastMentionAck = myMention.createdAt || Date.now();
+      notifyMention(myMention);
+    }
     if (isForum(chat) && !currentTopic) renderTopicList();
     else renderMessagesView(!first);
     if (first) { first = false; if (!document.hidden) markRead(chatId); }
@@ -1089,6 +1184,13 @@ function refreshTicks() {
 function buildMessageNode(message) {
   const row = document.createElement("div");
   const mine = message.sender === me.uid;
+  if (message.notice) {
+    row.className = "message notice-row";
+    row.dataset.messageId = message.id;
+    row._message = message;
+    row.innerHTML = `<div class="notice">${formatMessageText(message.text || "")}<span class="meta">${formatTime(message.createdAt)}</span></div>`;
+    return row;
+  }
   row.className = `message${mine ? " mine" : ""}`;
   row.dataset.messageId = message.id;
   row._message = message;
@@ -1146,6 +1248,7 @@ const messageInput = $("#messageInput");
 function autoGrow(el) { el.style.height = "auto"; el.style.height = Math.min(el.scrollHeight, 120) + "px"; }
 messageInput.addEventListener("input", () => {
   autoGrow(messageInput);
+  updateMentionPicker();
   const now = Date.now();
   if (currentChatId && now - lastTypingSent > 1800) {
     lastTypingSent = now;
@@ -1153,6 +1256,20 @@ messageInput.addEventListener("input", () => {
   }
 });
 messageInput.addEventListener("keydown", (e) => {
+  const panel = $("#mentionPanel");
+  const pickerOpen = panel && !panel.classList.contains("hidden");
+  if (pickerOpen) {
+    const opts = panel.querySelectorAll(".mention-option");
+    if (e.key === "ArrowDown") { e.preventDefault(); mentionIdx = (mentionIdx + 1) % opts.length; markMentionSel(); return; }
+    if (e.key === "ArrowUp") { e.preventDefault(); mentionIdx = (mentionIdx - 1 + opts.length) % opts.length; markMentionSel(); return; }
+    if (e.key === "Tab" || (e.key === "Enter" && !e.shiftKey)) {
+      e.preventDefault();
+      const opt = panel.querySelector(".mention-option");
+      if (opt && opt._u) replaceMention(opt._u);
+      return;
+    }
+    if (e.key === "Escape") { panel.classList.add("hidden"); return; }
+  }
   if (e.key === "Enter" && !e.shiftKey && !("ontouchstart" in window)) { e.preventDefault(); $("#messageForm").requestSubmit(); }
 });
 async function sendMessage({ text = "", image = null, sticker = null, voice = null, poll = null, toChatId = null, forwardedFrom = null }) {
@@ -1169,6 +1286,18 @@ async function sendMessage({ text = "", image = null, sticker = null, voice = nu
   if (poll) message.poll = poll;
   if (forwardedFrom) message.forwardedFrom = forwardedFrom;
   if (!toChatId && replyTarget) message.replyTo = { id: replyTarget.id, sender: replyTarget.senderName, text: replyTarget.text ? replyTarget.text.slice(0, 120) : "📷 Фото" };
+  // @упоминания → массив uid для уведомлений
+  if (text) {
+    const unameMap = await memberUsernameMap(chat);
+    const mentionArr = [];
+    const mentionRe = /@([a-z0-9_]{3,24})\b/gi;
+    let mt;
+    while ((mt = mentionRe.exec(text))) {
+      const uid = unameMap.get(mt[1].toLowerCase());
+      if (uid && uid !== me.uid && !mentionArr.includes(uid)) mentionArr.push(uid);
+    }
+    if (mentionArr.length) message.mentions = mentionArr;
+  }
   const ref = doc(collection(dbf, "chats", chatId, "messages"));
   const previewText = message.text || (sticker ? "🧩 Стикер" : voice ? "🎤 Голосовое сообщение" : poll ? "📊 Опрос" : "");
   const chatPatch = {
@@ -1192,7 +1321,17 @@ $("#messageForm").addEventListener("submit", async (event) => {
   if (!text) return;
   const chat = currentChat();
   if (isForum(chat) && !currentTopic) return;
+  // команды модерации /mute /warn /ban(/unban/unmute)
+  if (/^\/(mute|warn|ban|unmute|unban)\b/i.test(text)) {
+    sendBusy = true;
+    try { const handled = await doModeration(text); if (handled) { messageInput.value = ""; autoGrow(messageInput); localStorage.removeItem(`draft_${currentChatId}`); } }
+    finally { sendBusy = false; }
+    return;
+  }
   sendBusy = true;
+  // мут/бан для меня
+  if ((chat.mutes || {})[me.uid] > Date.now()) { sendBusy = false; toast("Вы замучены — писать сейчас нельзя"); return; }
+  if ((chat.bans || {})[me.uid] > Date.now()) { sendBusy = false; localStorage.removeItem(`draft_${currentChatId}`); toast("Вас забанили в этом чате"); return; }
   // очищаем поле сразу — повторный тап не отправит то же самое
   messageInput.value = ""; autoGrow(messageInput);
   localStorage.removeItem(`draft_${currentChatId}`);
@@ -1232,6 +1371,122 @@ function cancelReplyEdit() {
   $("#replyBar").classList.add("hidden");
 }
 $("#cancelReply").addEventListener("click", () => { if (editTarget) { messageInput.value = ""; autoGrow(messageInput); } cancelReplyEdit(); });
+
+// ---------- модерация: /mute /warn /ban ----------
+async function memberUsernameMap(chat) {
+  const map = new Map();
+  for (const uid of (chat?.members || [])) { const u = await fetchUser(uid); if (u?.username) map.set(u.username.toLowerCase(), uid); }
+  return map;
+}
+async function postNotice(text) {
+  const chatId = currentChatId;
+  const chat = chats.get(chatId);
+  if (!chat) return;
+  const message = {
+    sender: me.uid, senderName: me.displayName || me.username,
+    text: text.slice(0, 4000), notice: true, createdAt: Date.now(), reactions: {},
+    topicId: "general",
+  };
+  const chatPatch = {
+    lastMessage: { text: message.text, senderUid: me.uid, senderName: message.senderName, createdAt: message.createdAt, hasImage: false },
+    [`lastRead.${me.uid}`]: message.createdAt, [`unread.${me.uid}`]: 0, [`typing.${me.uid}`]: 0,
+  };
+  for (const member of chat.members) if (member !== me.uid) chatPatch[`unread.${member}`] = increment(1);
+  const batch = writeBatch(dbf);
+  batch.set(doc(collection(dbf, "chats", chatId, "messages")), message);
+  batch.update(doc(dbf, "chats", chatId), chatPatch);
+  await batch.commit();
+  bumpChat(chatId);
+}
+const PERMANENT = 4102444800000; // ~2100
+function defaultDuration(cmd) {
+  if (cmd === "warn") return 30 * 60e3;
+  if (cmd === "ban") return 24 * 3600e3;
+  return 60 * 60e3;
+}
+const MOD_VERBS = { mute: "замутил(а)", warn: "выдал(а) варн", ban: "забанил(а)" };
+async function doModeration(raw) {
+  const chat = currentChat();
+  if (!chat) return false;
+  if (chat.type !== "group" && chat.type !== "channel") { if (/^\/(mute|warn|ban|unmute|unban)\b/i.test(raw)) { toast("Команда доступна только в группах/каналах"); return true; } return false; }
+  if (!isChatAdmin(chat)) { toast("Модерировать — только админ или создатель"); return true; }
+  const mm = raw.trim().match(/^\/(mute|warn|ban|unmute|unban)(?:\s+(.*))?$/i);
+  if (!mm) return false;
+  const cmd = mm[1].toLowerCase();
+  const tokens = (mm[2] || "").trim().split(/\s+/).filter(Boolean);
+
+  let targetUid = null, targetName = "", timeStr = null;
+  if (tokens.length && tokens[0].startsWith("@")) {
+    targetUid = (await getUsernameUid(tokens[0].slice(1))) || null;
+    targetName = tokens[0].toLowerCase();
+    timeStr = tokens[1] ?? null;
+  } else if (replyTarget && !tokens.length) {
+    targetUid = replyTarget.sender; targetName = replyTarget.senderName; timeStr = null;
+  } else if (replyTarget && tokens.length) {
+    targetUid = replyTarget.sender; targetName = replyTarget.senderName; timeStr = tokens[0];
+  } else if (tokens.length) {
+    targetUid = (await getUsernameUid(tokens[0])) || null;
+    targetName = tokens[0].startsWith("@") ? tokens[0].toLowerCase() : "@" + tokens[0].toLowerCase();
+    timeStr = tokens[1] ?? null;
+  }
+  if (!targetUid) { toast("Укажите @имя или ответьте на сообщение"); return true; }
+  if (targetUid === me.uid) { toast("Нельзя модерировать себя"); return true; }
+
+  const memberSet = new Set(chat.members || []);
+  const targetRole = chat.ownerUid === targetUid ? "owner" : ((chat.admins || []).includes(targetUid) ? "admin" : "member");
+  if (targetRole === "owner") { toast("Владельца нельзя модерировать"); return true; }
+  if (targetRole === "admin" && chat.ownerUid !== me.uid) { toast("Админа может модерировать только создатель"); return true; }
+  if (cmd !== "unban" && cmd !== "unmute" && !memberSet.has(targetUid)) { toast("Пользователя нет в чате"); return true; }
+
+  const ref = doc(dbf, "chats", chat.id);
+  const who = me.displayName || me.username;
+  const timeNow = Date.now();
+  const dur = timeStr == null ? defaultDuration(cmd) : parseDuration(timeStr);
+
+  const doUnmute = ["unmute", "mute"].includes(cmd) && dur === 0;
+  const doUnban = ["unban", "ban"].includes(cmd) && dur === 0;
+  try {
+    if (cmd === "unmute" || (cmd === "mute" && dur === 0)) {
+      await updateDoc(ref, { [`mutes.${targetUid}`]: deleteField() });
+      postNotice(`🔔 ${who} снял(а) мут с ${targetName}`); toast("Мут снят");
+      return true;
+    }
+    if (cmd === "unban" || (cmd === "ban" && dur === 0)) {
+      await updateDoc(ref, { members: arrayUnion(targetUid), [`bans.${targetUid}`]: deleteField() });
+      postNotice(`🚪 ${who} снял(а) бан с ${targetName}`); toast("Бан снят");
+      return true;
+    }
+    if (cmd === "mute") {
+      const until = timeNow + dur;
+      await updateDoc(ref, { [`mutes.${targetUid}`]: until });
+      postNotice(`🔕 ${who} замутил(а) ${targetName} до ${fmtUntil(until)}`);
+      toast(`Замучено до ${fmtUntil(until)}`);
+      return true;
+    }
+    if (cmd === "warn") {
+      const until = timeNow + dur;
+      await updateDoc(ref, { [`warns.${targetUid}`]: increment(1), [`mutes.${targetUid}`]: until });
+      postNotice(`⚠️ ${who} ${MOD_VERBS.warn} ${targetName} и замутил(а) до ${fmtUntil(until)}`);
+      toast(`Варн выдан, мут до ${fmtUntil(until)}`);
+      return true;
+    }
+    if (cmd === "ban") {
+      const until = timeNow + dur;
+      await updateDoc(ref, { members: arrayRemove(targetUid), admins: arrayRemove(targetUid), [`bans.${targetUid}`]: until });
+      postNotice(`🚫 ${who} забанил(а) ${targetName} до ${fmtUntil(until)}`);
+      toast(`Забанен до ${fmtUntil(until)}`);
+      return true;
+    }
+  } catch (error) { toast(ruError(error)); }
+  return true;
+}
+async function getUsernameUid(name) {
+  try {
+    const reg = await getDoc(doc(dbf, "usernames", name.replace(/^@/, "").toLowerCase()));
+    if (reg.exists()) return reg.data().uid;
+  } catch { /* ignore */ }
+  return null;
+}
 
 // ---------- фото ----------
 $("#attachButton").addEventListener("click", () => $("#fileInput").click());

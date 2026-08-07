@@ -57,6 +57,41 @@ async function getDocById(H, path) {
   if (d.error) return null;
   return { id: d.name.split("/").pop(), ...fromFields(d.fields) };
 }
+// последние сообщения чата (для @-упоминаний) — orderBy работает на списке без доп. индекса
+async function listMessages(H, chatId, limit = 25) {
+  const url = `${FS_BASE}/chats/${chatId}/messages?pageSize=${limit}&orderBy=${encodeURIComponent('"createdAt desc"')}`;
+  const d = await fetch(url, { headers: H }).then(r => r.json());
+  if (d.error) return [];
+  return (d.documents || []).map(doc => ({ id: doc.name.split("/").pop(), ...fromFields(doc.fields) }));
+}
+
+// общая отправка FCM с чисткой мёртвых токенов
+async function sendToTokens(H, user, { title, body, chatId }) {
+  let sent = 0;
+  for (const fcmToken of user.fcmTokens) {
+    const res = await fetch(`https://fcm.googleapis.com/v1/projects/${PROJECT}/messages:send`, {
+      method: "POST", headers: H,
+      body: JSON.stringify({
+        message: {
+          token: fcmToken,
+          notification: { title, body: (body || "").slice(0, 200) },
+          data: { chatId: chatId || "" },
+          android: { priority: "high", notification: { channel_id: "default", tag: chatId || "" } },
+        },
+      }),
+    }).then(r => r.json());
+    if (res.error) {
+      const code = res.error.status || "";
+      if (code === "NOT_FOUND" || code === "UNREGISTERED" || code === "INVALID_ARGUMENT") {
+        await fetch(`${FS_BASE}/users/${user.id}?updateMask.fieldPaths=fcmTokens`, {
+          method: "PATCH", headers: H,
+          body: JSON.stringify({ fields: { fcmTokens: { arrayValue: { values: user.fcmTokens.filter(t => t !== fcmToken).map(t => ({ stringValue: t })) } } } }),
+        }).catch(() => {});
+      }
+    } else sent++;
+  }
+  return sent;
+}
 
 // ---------- основной проход ----------
 async function tick(env) {
@@ -82,11 +117,28 @@ async function tick(env) {
   };
 
   let sent = 0;
+  const mentioned = new Set(); // uid — уже получили уведомление об @упоминании
   for (const chat of chats) {
+    // @-упоминания: уведомляем тех, кого тегнули (даже если чат з нимтит для них), если они офлайн
+    const recent = await listMessages(H, chat.id);
+    for (const m of recent) {
+      if ((m.createdAt || 0) <= lastRun || !Array.isArray(m.mentions)) continue;
+      for (const uid of m.mentions) {
+        if (!uid || uid === m.sender || mentioned.has(uid)) continue;
+        const user = await getUser(uid);
+        if (!user || !Array.isArray(user.fcmTokens) || !user.fcmTokens.length) continue;
+        if (Date.now() - (user.lastSeen || 0) < ONLINE_WINDOW) continue;
+        const senderName = typeof m.senderName === "string" && m.senderName ? m.senderName : "Кто-то";
+        mentioned.add(uid);
+        sent += await sendToTokens(H, user, { title: "🔔 Вас упомянули", body: `${senderName}: ${m.text || "📷 Фото"}`, chatId: chat.id });
+      }
+    }
+
     const lm = chat.lastMessage || {};
     if ((lm.createdAt || 0) <= lastRun) continue;
     for (const uid of chat.members || []) {
       if (uid === lm.senderUid) continue;
+      if (mentioned.has(uid)) continue; // уже уведомили об упоминании
       if ((chat.unread || {})[uid] > 0 === false) continue;
       if ((chat.muted || []).includes(uid)) continue;
       const user = await getUser(uid);
@@ -95,29 +147,7 @@ async function tick(env) {
       const isGroup = chat.type === "group";
       const title = isGroup ? (chat.title || "Группа") : (lm.senderName || "SandyGram");
       const body = (isGroup ? `${lm.senderName}: ` : "") + (lm.text || "📷 Фото");
-      for (const fcmToken of user.fcmTokens) {
-        const res = await fetch(`https://fcm.googleapis.com/v1/projects/${PROJECT}/messages:send`, {
-          method: "POST", headers: H,
-          body: JSON.stringify({
-            message: {
-              token: fcmToken,
-              notification: { title, body: body.slice(0, 200) },
-              data: { chatId: chat.id },
-              android: { priority: "high", notification: { channel_id: "default", tag: chat.id } },
-            },
-          }),
-        }).then(r => r.json());
-        if (res.error) {
-          const code = res.error.status || "";
-          if (code === "NOT_FOUND" || code === "UNREGISTERED" || code === "INVALID_ARGUMENT") {
-            // мёртвый токен — убираем
-            await fetch(`${FS_BASE}/users/${uid}?updateMask.fieldPaths=fcmTokens`, {
-              method: "PATCH", headers: H,
-              body: JSON.stringify({ fields: { fcmTokens: { arrayValue: { values: user.fcmTokens.filter(t => t !== fcmToken).map(t => ({ stringValue: t })) } } } }),
-            }).catch(() => {});
-          }
-        } else sent++;
-      }
+      sent += await sendToTokens(H, user, { title, body, chatId: chat.id });
     }
   }
 

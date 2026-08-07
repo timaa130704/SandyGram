@@ -49,7 +49,7 @@ const AVATAR_TONES = ["#2b2b2b", "#3a3a3a", "#4a4a4a", "#5a5a5a", "#6b6b6b", "#7
 const ONLINE_WINDOW = 70e3;
 const QUICK_REACTIONS = ["❤️", "👍", "🔥", "😂", "😮", "😢"];
 const SITE = "https://sandygram-a3b42.web.app";
-const APP_VERSION = "2.1.0";
+const APP_VERSION = "2.2.0";
 const APK_URL = "https://github.com/timaa130704/SandyGram/releases/latest/download/SandyGram.apk";
 // Сигнальная шина RTDB — для мгновенного realtime у ПК-клиента
 const RTDB = "https://sandygram-a3b42-default-rtdb.europe-west1.firebasedatabase.app";
@@ -67,6 +67,34 @@ const ICE_SERVERS = [
 const STICKERS = ["1F600","1F602","1F60D","1F60E","1F914","1F644","1F62D","1F621","1F973","1F97A","1F480","1F4A9","1F525","2764","1F44D","1F44E","1F44C","1F64F","1F4AA","1F440","1F389","1F680","26A1","1F31A","1F31D","1F63B","1F63C","1F998","1F984","1F37F"];
 
 const emailFor = (u) => `${u}@sandygram.app`;
+const modRegex = /^\/(mute|warn|ban|unmute|unban)\b/i;
+const PERMANENT_MOD = 4102444800000; // ~2100 год, «навсегда»
+function parseDurationMod(s) {
+  const t = (s || "").trim().toLowerCase();
+  if (!t) return null;
+  if (t === "0" || t === "off" || t === "нет" || t === "снять") return 0;
+  const m = /^(\d+)([мчдхс]|мин|час|час|ч|день|дня|дней|мес|сек)?$/.exec(t.replace(/\s/g, ""));
+  if (!m) return null;
+  const n = parseInt(m[1], 10);
+  if (!n) return null;
+  const u = m[2] || "м";
+  const per = u.includes("с") || u.includes("сек") ? 1e3 : u.includes("м") ? 60e3 : u.includes("ч") || u.includes("х") ? 3600e3 : u.includes("д") ? 864e5 : 30 * 864e5;
+  return n * per * (u.includes("м") && !u.includes("мин") ? 1 : u === "мес" ? 30 : 1);
+}
+function fmtDurationMod(d) {
+  if (!d) return "нет";
+  if (d >= PERMANENT_MOD) return "навсегда";
+  const min = Math.round(d / 60e3);
+  if (min < 60) return `${min} мин`;
+  const h = min / 60;
+  if (h < 24) return `${Math.floor(h)}ч ${min % 60 ? `${min % 60}м` : ""}`;
+  const day = Math.floor(h / 24);
+  return `${day}д ${Math.floor(h % 24)}ч`;
+}
+function fmtUntilMod(ts) {
+  if (ts >= PERMANENT_MOD) return "навсегда";
+  return new Date(ts).toLocaleString([], { day: "2-digit", month: "2-digit", hour: "2-digit", minute: "2-digit" });
+}
 const randomId = (len = 18) => { let s = ""; while (s.length < len) s += Math.random().toString(16).slice(2); return s.slice(0, len); };
 const isOnlineUser = (u) => u && Date.now() - (u.lastSeen || 0) < ONLINE_WINDOW;
 const fmtTime = (ts) => new Date(ts).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" });
@@ -1263,7 +1291,7 @@ function ChatInfoSheet({ ctx, chat, onClose }) {
 
 // ================================================================ ЧАТ
 function ChatScreen({ ctx, chatId }) {
-  const { T, me, chats, viewOf, setScreen, openDmByName } = ctx;
+  const { T, me, chats, viewOf, setScreen, openDmByName, fetchUser } = ctx;
   const chat = chats.get(chatId);
   const [messages, setMessages] = useState([]);
   const [text, setText] = useState("");
@@ -1287,9 +1315,23 @@ function ChatScreen({ ctx, chatId }) {
   const lastTyping = useRef(0);
   const listRef = useRef(null);
   const sendingRef = useRef(false); // защита от спама по кнопке отправки
+  const [mentionList, setMentionList] = useState([]); // подсказки @-пикера
+  const [mentionBanner, setMentionBanner] = useState(null); // уведомление об @упоминании
+  const lastMentionAckRef = useRef(0);
 
   const isForum = !!(chat?.topics && chat.topics.length);
   const isAdmin = (chat?.type === "group" || chat?.type === "channel") && (chat.ownerUid === me.uid || (chat.admins || []).includes(me.uid));
+
+  // карта @имя → uid участников (для @-пикера и команд)
+  const memberUsernameMapRef = useRef(Promise.resolve(new Map()));
+  useEffect(() => {
+    if (!chat) return;
+    memberUsernameMapRef.current = (async () => {
+      const map = new Map();
+      for (const uid of chat.members || []) { const u = await fetchUser(uid); if (u?.username) map.set(u.username.toLowerCase(), uid); }
+      return map;
+    })();
+  }, [chatId]);
 
   // системный жест/кнопка «назад» = навигация, а не выход из приложения
   useEffect(() => {
@@ -1317,7 +1359,16 @@ function ChatScreen({ ctx, chatId }) {
   useEffect(() => {
     const q = query(collection(db, "chats", chatId, "messages"), orderBy("createdAt", "desc"), limit(300));
     const unsub = onSnapshot(q, (snap) => {
-      setMessages(snap.docs.map(d => ({ id: d.id, ...d.data() })));
+      const list = snap.docs.map(d => ({ id: d.id, ...d.data() }));
+      setMessages(list);
+      const mine = lastMentionAckRef.current
+        ? list.find(m => (m.mentions || []).includes(me.uid) && m.sender !== me.uid && (m.createdAt || 0) > lastMentionAckRef.current)
+        : null;
+      if (mine) {
+        lastMentionAckRef.current = mine.createdAt || Date.now();
+        setMentionBanner(mine);
+        setTimeout(() => setMentionBanner(null), 5000);
+      }
     }, () => { });
     return unsub;
   }, [chatId]);
@@ -1362,6 +1413,13 @@ function ChatScreen({ ctx, chatId }) {
     if (poll) msg.poll = poll;
     if (forwardedFrom) msg.forwardedFrom = forwardedFrom;
     if (!forwardedFrom && targetChat.id === chatId && replyTo) msg.replyTo = { id: replyTo.id, sender: replyTo.senderName, text: replyTo.text ? replyTo.text.slice(0, 120) : "📷 Фото" };
+    if (textBody) {
+      const map = await memberUsernameMapRef.current;
+      const arr = [];
+      const re = /@([a-z0-9_]{3,24})\b/gi;
+      let mt; while ((mt = re.exec(textBody))) { const uid = map.get(mt[1].toLowerCase()); if (uid && uid !== me.uid && !arr.includes(uid)) arr.push(uid); }
+      if (arr.length) msg.mentions = arr;
+    }
     const previewText = msg.text || (sticker ? "🧩 Стикер" : voice ? "🎤 Голосовое сообщение" : poll ? "📊 Опрос" : "");
     const patch = {
       lastMessage: { text: previewText, senderUid: me.uid, senderName: msg.senderName, createdAt: msg.createdAt, hasImage: !!image },
@@ -1377,6 +1435,17 @@ function ChatScreen({ ctx, chatId }) {
   const submit = async () => {
     const body = text.trim();
     if (!body || sendingRef.current) return;
+    if (modRegex.test(body)) {
+      sendingRef.current = true;
+      try {
+        const handled = await runModeration(body);
+        if (handled) { setText(""); setMentionList([]); AsyncStorage.removeItem(`draft_${chatId}`).catch(() => { }); }
+      } catch (e) { Alert.alert("Ошибка", ruError(e)); }
+      finally { sendingRef.current = false; }
+      return;
+    }
+    if ((chat.mutes || {})[me.uid] > Date.now()) { Alert.alert("", "Вы замучены — писать сейчас нельзя"); return; }
+    if ((chat.bans || {})[me.uid] > Date.now()) { Alert.alert("", "Вас забанили в этом чате"); return; }
     sendingRef.current = true;
     setText(""); // очищаем сразу — повторный тап не отправит то же самое
     AsyncStorage.removeItem(`draft_${chatId}`).catch(() => { });
@@ -1412,6 +1481,22 @@ function ChatScreen({ ctx, chatId }) {
       lastTyping.current = now;
       updateDoc(doc(db, "chats", chatId), { [`typing.${me.uid}`]: now }).catch(() => { });
     }
+    // @-пикер: показываем подсказки после @префикса
+    const m = /(?:^|[\s(])@([a-z0-9_]*)$/.exec(val.slice(0, val.length));
+    if (!m || !m[1]) { setMentionList([]); return; }
+    const q = m[1].toLowerCase();
+    memberUsernameMapRef.current.then(map => {
+      const list = [...map.entries()].filter(([uname]) => uname.startsWith(q) && map.get(uname) !== me.uid).slice(0, 6);
+      setMentionList(list.map(([uname, uid]) => ({ uid, uname })));
+    }).catch(() => setMentionList([]));
+  };
+  const insertMention = (it) => {
+    const val = text;
+    const m = /(?:^|[\s(])@([a-z0-9_]*)$/.exec(val);
+    const nt = m ? `${val.slice(0, val.length - m[0].length + m[0].lastIndexOf("@"))}@${it.uname} ` : `${val}@${it.uname} `;
+    AsyncStorage.setItem(`draft_${chatId}`, nt).catch(() => { });
+    setText(nt);
+    setMentionList([]);
   };
   // голосовые: тап — запись, повторный тап — отправка (expo-audio)
   const toggleRec = async () => {
@@ -1521,6 +1606,85 @@ function ChatScreen({ ctx, chatId }) {
     ? visible.filter(m => m.text && m.text.toLowerCase().includes(searchText.trim().toLowerCase())).slice(0, 30)
     : [];
 
+  // ---------- модерация: /mute /warn /ban ----------
+  const postNoticeApk = async (text) => {
+    const message = {
+      sender: me.uid, senderName: me.displayName || me.username,
+      text: text.slice(0, 4000), notice: true, createdAt: Date.now(), reactions: {},
+      topicId: (isForum && topic) ? topic.id : "general",
+    };
+    const patch = {
+      lastMessage: { text: message.text, senderUid: me.uid, senderName: message.senderName, createdAt: message.createdAt, hasImage: false },
+      [`lastRead.${me.uid}`]: message.createdAt, [`unread.${me.uid}`]: 0, [`typing.${me.uid}`]: 0,
+    };
+    for (const m of chat.members || []) if (m !== me.uid) patch[`unread.${m}`] = increment(1);
+    const batch = writeBatch(db);
+    batch.set(doc(collection(db, "chats", chatId, "messages")), message);
+    batch.update(doc(db, "chats", chatId), patch);
+    await batch.commit();
+    bumpChat(chatId);
+  };
+  const runModeration = async (raw) => {
+    if (chat.type !== "group" && chat.type !== "channel") { Alert.alert("", "Команда доступна только в группах/каналах"); return true; }
+    if (!isAdmin) { Alert.alert("", "Модерировать — только админ или создатель"); return true; }
+    const mm = raw.match(/^\/(mute|warn|ban|unmute|unban)(?:\s+(.*))?$/i);
+    if (!mm) return false;
+    const cmd = mm[1].toLowerCase();
+    const tokens = (mm[2] || "").trim().split(/\s+/).filter(Boolean);
+    const map = await memberUsernameMapRef.current;
+    let targetUid = null, targetName = "", timeStr = null;
+    if (tokens.length && tokens[0].startsWith("@")) {
+      targetUid = map.get(tokens[0].slice(1).toLowerCase()) || null; targetName = tokens[0].toLowerCase(); timeStr = tokens[1] ?? null;
+    } else if (replyTo && !tokens.length) { targetUid = replyTo.sender; targetName = replyTo.senderName; }
+    else if (replyTo && tokens.length) { targetUid = replyTo.sender; targetName = replyTo.senderName; timeStr = tokens[0]; }
+    else if (tokens.length) {
+      targetUid = map.get(tokens[0].replace(/^@/, "").toLowerCase()) || null;
+      targetName = tokens[0].startsWith("@") ? tokens[0].toLowerCase() : "@" + tokens[0].toLowerCase();
+      timeStr = tokens[1] ?? null;
+    }
+    if (!targetUid) { Alert.alert("", "Укажите @имя или ответьте на сообщение"); return true; }
+    if (targetUid === me.uid) { Alert.alert("", "Нельзя модерировать себя"); return true; }
+    const targetRole = chat.ownerUid === targetUid ? "owner" : ((chat.admins || []).includes(targetUid) ? "admin" : "member");
+    if (targetRole === "owner") { Alert.alert("", "Владельца нельзя модерировать"); return true; }
+    if (targetRole === "admin" && chat.ownerUid !== me.uid) { Alert.alert("", "Админа может модерировать только создатель"); return true; }
+    if (cmd !== "unban" && cmd !== "unmute" && !(chat.members || []).includes(targetUid)) { Alert.alert("", "Пользователя нет в чате"); return true; }
+    const ref = doc(db, "chats", chat.id);
+    const who = me.displayName || me.username;
+    const timeNow = Date.now();
+    const dur = timeStr == null ? (cmd === "warn" ? 30 * 60e3 : cmd === "ban" ? 24 * 3600e3 : 60 * 60e3) : parseDurationMod(timeStr);
+    if (dur == null) { Alert.alert("", "Не понял время. Пример: /mute @имя 2ч или 30м"); return true; }
+    const nm = (str) => String(str).replace(/^@/, "");
+    try {
+      if (cmd === "unmute" || (cmd === "mute" && dur === 0)) {
+        await updateDoc(ref, { [`mutes.${targetUid}`]: deleteField() });
+        await postNoticeApk(`🔔 ${who} снял(а) мут с @${nm(targetName)}`); Alert.alert("", "Мут снят"); return true;
+      }
+      if (cmd === "unban" || (cmd === "ban" && dur === 0)) {
+        await updateDoc(ref, { members: arrayUnion(targetUid), [`bans.${targetUid}`]: deleteField() });
+        await postNoticeApk(`🚪 ${who} снял(а) бан с @${nm(targetName)}`); Alert.alert("", "Бан снят"); return true;
+      }
+      if (cmd === "mute") {
+        const until = timeNow + dur;
+        await updateDoc(ref, { [`mutes.${targetUid}`]: until });
+        await postNoticeApk(`🔕 ${who} замутил(а) ${targetName} до ${fmtUntilMod(until)}`);
+        Alert.alert("", `Замучен до ${fmtUntilMod(until)}`); return true;
+      }
+      if (cmd === "warn") {
+        const until = timeNow + dur;
+        await updateDoc(ref, { [`warns.${targetUid}`]: increment(1), [`mutes.${targetUid}`]: until });
+        await postNoticeApk(`⚠️ ${who} выдал(а) варн ${targetName} и замутил(а) до ${fmtUntilMod(until)}`);
+        Alert.alert("", `Варн выдан, мут до ${fmtUntilMod(until)}`); return true;
+      }
+      if (cmd === "ban") {
+        const until = timeNow + dur;
+        await updateDoc(ref, { members: arrayRemove(targetUid), admins: arrayRemove(targetUid), [`bans.${targetUid}`]: until });
+        await postNoticeApk(`🚫 ${who} забанил(а) ${targetName} до ${fmtUntilMod(until)}`);
+        Alert.alert("", `Забанен до ${fmtUntilMod(until)}`); return true;
+      }
+    } catch (e) { Alert.alert("Ошибка", ruError(e)); }
+    return true;
+  };
+
   const msgMenuItems = (m) => {
     const mine = m.sender === me.uid;
     const items = [
@@ -1580,6 +1744,15 @@ function ChatScreen({ ctx, chatId }) {
           <MaterialIcons name="search" size={22} color={T.text} />
         </TouchableOpacity>
       </View>
+
+      {/* банер-уведомление об @упоминании */}
+      {mentionBanner && (
+        <TouchableOpacity onPress={() => setMentionBanner(null)} style={{ backgroundColor: T.inverse, paddingVertical: 8, paddingHorizontal: 14 }}>
+          <Text style={{ color: T.onInverse, fontSize: 13.5, fontWeight: "600", textAlign: "center" }}>
+            🔔 {mentionBanner.senderName} упомянул(а) вас: {(mentionBanner.text || "📷 Фото").slice(0, 80)}
+          </Text>
+        </TouchableOpacity>
+      )}
 
       {/* поиск по сообщениям */}
       {searchOpen && (
@@ -1668,6 +1841,18 @@ function ChatScreen({ ctx, chatId }) {
               <TouchableOpacity onPress={() => { if (editTarget) setText(""); setReplyTo(null); setEditTarget(null); }}>
                 <MaterialIcons name="close" size={20} color={T.muted} />
               </TouchableOpacity>
+            </View>
+          )}
+          {mentionList.length > 0 && (
+            <View style={{ backgroundColor: T.surface, paddingVertical: 6, paddingHorizontal: 8, borderTopWidth: StyleSheet.hairlineWidth, borderColor: T.outline }}>
+              <ScrollView horizontal keyboardShouldPersistTaps="handled" showsHorizontalScrollIndicator={false}>
+                {mentionList.map(it => (
+                  <TouchableOpacity key={it.uid} onPress={() => insertMention(it)} style={{ flexDirection: "row", alignItems: "center", gap: 6, backgroundColor: T.surface2, borderRadius: 999, paddingHorizontal: 12, paddingVertical: 7, marginRight: 8 }}>
+                    <Text style={{ color: T.text, fontSize: 15 }}>@</Text>
+                    <Text style={{ color: T.text, fontWeight: "700", fontSize: 15 }}>{it.uname}</Text>
+                  </TouchableOpacity>
+                ))}
+              </ScrollView>
             </View>
           )}
           {canWrite ? (
@@ -1844,6 +2029,13 @@ function MessageBubble({ T, m, mine, group, lastReadByOthers, saved, onLongPress
     if (now - lastTap.current < 280) onDoubleTap();
     lastTap.current = now;
   };
+  if (m.notice) {
+    return (
+      <View style={{ alignItems: "center", marginVertical: 3 }}>
+        <Text style={{ color: T.muted, fontSize: 12, backgroundColor: T.surface2, paddingHorizontal: 12, paddingVertical: 5, borderRadius: 999, overflow: "hidden", textAlign: "center" }}>{m.text}</Text>
+      </View>
+    );
+  }
   return (
     <Animated.View {...responder.panHandlers} style={{ transform: [{ translateX: pan }] }}>
       <TouchableOpacity activeOpacity={0.85} onLongPress={onLongPress} onPress={onPress} delayLongPress={350}
