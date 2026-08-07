@@ -16,5 +16,5 @@ window.USE_EMULATORS = ["localhost", "127.0.0.1"].includes(location.hostname);
 window.VAPID_KEY = "BBGJ2vVEgOLEYLhaBwGMw7qYFlEPHWNW6yE94hxS1bapT0LEj9h4qNyDo4nMrHTv6E-GT4USYdEqpuOq1B2khMk";
 
 // Cloudflare Worker «sandygram-push»: эндпоинт обмена QR refresh-токена на Custom Token.
-// Заполняется после деплоя воркера (wrangler deploy) — URL вида https://sandygram-push.<поддомен>.workers.dev
-window.QR_WORKER_URL = "";
+// URL получен из «wrangler deploy» — https://sandygram-push.sandygram.workers.dev
+window.QR_WORKER_URL = "https://sandygram-push.sandygram.workers.dev";
