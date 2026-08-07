@@ -36,12 +36,12 @@ import {
 const THEMES = {
   dark: {
     bg: "#0a0a0a", surface: "#141414", surface2: "#1e1e1e", outline: "#333",
-    text: "#f2f2f2", muted: "#8f8f8f", inverse: "#f5f5f5", onInverse: "#0d0d0d",
+    text: "#f2f2f2", muted: "#8f8f8f", inverse: "#d0bcff", onInverse: "#381e72",
     bubbleIn: "#1f1f1f", danger: "#ff6b6b",
   },
   light: {
     bg: "#f4f4f4", surface: "#ffffff", surface2: "#ececec", outline: "#d4d4d4",
-    text: "#111", muted: "#737373", inverse: "#171717", onInverse: "#fafafa",
+    text: "#111", muted: "#737373", inverse: "#6750A4", onInverse: "#ffffff",
     bubbleIn: "#ffffff", danger: "#c92a2a",
   },
 };
@@ -49,7 +49,7 @@ const AVATAR_TONES = ["#2b2b2b", "#3a3a3a", "#4a4a4a", "#5a5a5a", "#6b6b6b", "#7
 const ONLINE_WINDOW = 70e3;
 const QUICK_REACTIONS = ["❤️", "👍", "🔥", "😂", "😮", "😢"];
 const SITE = "https://sandygram-a3b42.web.app";
-const APP_VERSION = "2.0.0";
+const APP_VERSION = "2.1.0";
 const APK_URL = "https://github.com/timaa130704/SandyGram/releases/latest/download/SandyGram.apk";
 // Сигнальная шина RTDB — для мгновенного realtime у ПК-клиента
 const RTDB = "https://sandygram-a3b42-default-rtdb.europe-west1.firebasedatabase.app";

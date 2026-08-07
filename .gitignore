@@ -8,3 +8,6 @@ service-account*.json
 ping-key.txt
 *.apk
 .wrangler/
+desktop/bin/
+desktop/obj/
+desktop/publish/

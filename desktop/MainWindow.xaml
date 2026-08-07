@@ -14,8 +14,8 @@
     <SolidColorBrush x:Key="Text" Color="#F2F2F2"/>
     <SolidColorBrush x:Key="Muted" Color="#8F8F8F"/>
     <SolidColorBrush x:Key="Faint" Color="#5A5A5A"/>
-    <SolidColorBrush x:Key="Inverse" Color="#F5F5F5"/>
-    <SolidColorBrush x:Key="OnInverse" Color="#0D0D0D"/>
+    <SolidColorBrush x:Key="Inverse" Color="#D0BCFF"/>
+    <SolidColorBrush x:Key="OnInverse" Color="#381E72"/>
 
     <!-- тонкий скроллбар в стиле M3 -->
     <Style TargetType="ScrollBar">
