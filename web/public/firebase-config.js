@@ -13,4 +13,4 @@ window.FIREBASE_CONFIG = {
 window.USE_EMULATORS = ["localhost", "127.0.0.1"].includes(location.hostname);
 
 // Ключ веб-пушей (Cloud Messaging → Web Push certificates); пусто = пуши в браузере выключены
-window.VAPID_KEY = "";
+window.VAPID_KEY = "BBGJ2vVEgOLEYLhaBwGMw7qYFlEPHWNW6yE94hxS1bapT0LEj9h4qNyDo4nMrHTv6E-GT4USYdEqpuOq1B2khMk";
