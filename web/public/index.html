@@ -56,6 +56,8 @@
               <strong id="chatTitle">Чат</strong>
               <small id="chatSubtitle"></small>
             </div>
+            <button class="icon-button hidden" id="audioCallBtn" aria-label="Позвонить"><svg viewBox="0 0 24 24" width="20" height="20" fill="currentColor"><path d="M6.62 10.79c1.44 2.83 3.76 5.14 6.59 6.59l2.2-2.2c.27-.27.67-.36 1.02-.24 1.12.37 2.33.57 3.57.57.55 0 1 .45 1 1V20c0 .55-.45 1-1 1-9.39 0-17-7.61-17-17 0-.55.45-1 1-1h3.5c.55 0 1 .45 1 1 0 1.25.2 2.45.57 3.57.11.35.03.74-.25 1.02l-2.2 2.2z"/></svg></button>
+            <button class="icon-button hidden" id="videoCallBtn" aria-label="Видеозвонок"><svg viewBox="0 0 24 24" width="20" height="20" fill="currentColor"><path d="M17 10.5V7c0-.55-.45-1-1-1H4c-.55 0-1 .45-1 1v10c0 .55.45 1 1 1h12c.55 0 1-.45 1-1v-3.5l4 4v-11l-4 4z"/></svg></button>
             <button class="icon-button" id="chatMenuButton" aria-label="Меню чата"><svg viewBox="0 0 24 24" width="22" height="22" fill="currentColor"><path d="M12 8c1.1 0 2-.9 2-2s-.9-2-2-2-2 .9-2 2 .9 2 2 2zm0 2c-1.1 0-2 .9-2 2s.9 2 2 2 2-.9 2-2-.9-2-2-2zm0 6c-1.1 0-2 .9-2 2s.9 2 2 2 2-.9 2-2-.9-2-2-2z"/></svg></button>
           </header>
           <div class="pinned-bar hidden" id="pinnedBar">
@@ -149,6 +151,34 @@
       <div class="story-views" id="storyViews"></div>
       <div class="story-nav story-prev" id="storyPrev"></div>
       <div class="story-nav story-next" id="storyNext"></div>
+    </div>
+
+    <!-- Экран звонка -->
+    <div class="call-overlay hidden" id="callOverlay">
+      <video id="remoteVideo" autoplay playsinline></video>
+      <video id="localVideo" autoplay playsinline muted></video>
+      <div class="call-info">
+        <span id="callAvatar"></span>
+        <b id="callName"></b>
+        <span id="callStatus">Соединение…</span>
+      </div>
+      <div class="call-controls">
+        <button id="muteBtn" class="call-btn" title="Микрофон">🎙</button>
+        <button id="camBtn" class="call-btn hidden" title="Камера">📹</button>
+        <button id="hangupBtn" class="call-btn danger" title="Завершить">📵</button>
+      </div>
+    </div>
+    <!-- Входящий звонок -->
+    <div class="incoming-call hidden" id="incomingCall">
+      <div class="incoming-card">
+        <span id="incomingAvatar"></span>
+        <b id="incomingName"></b>
+        <span id="incomingKind">Входящий звонок</span>
+        <div class="incoming-actions">
+          <button id="declineBtn" class="call-btn danger">📵</button>
+          <button id="acceptBtn" class="call-btn accept">📞</button>
+        </div>
+      </div>
     </div>
 
     <div class="toast" id="toast"></div>

@@ -2,7 +2,7 @@
   "expo": {
     "name": "SandyGram",
     "slug": "sandygram",
-    "version": "1.4.0",
+    "version": "2.0.0",
     "orientation": "portrait",
     "icon": "./assets/icon.png",
     "userInterfaceStyle": "automatic",
@@ -36,7 +36,7 @@
         }
       ],
       "googleServicesFile": "./google-services.json",
-      "versionCode": 6
+      "versionCode": 7
     },
     "web": {
       "favicon": "./assets/favicon.png"
@@ -50,7 +50,8 @@
       "expo-notifications",
       "expo-audio",
       "@react-native-google-signin/google-signin",
-      "expo-font"
+      "expo-font",
+      "@config-plugins/react-native-webrtc"
     ],
     "notification": {
       "color": "#0a0a0a"

@@ -12,6 +12,7 @@ import {
   arrayUnion, arrayRemove, increment, writeBatch, deleteField,
 } from "https://www.gstatic.com/firebasejs/10.14.1/firebase-firestore.js";
 import { getMessaging, getToken } from "https://www.gstatic.com/firebasejs/10.14.1/firebase-messaging.js";
+import { getDatabase, ref as dbRef, onValue, onChildAdded, set as dbSet, update as dbUpdate, push as dbPush, remove as dbRemove } from "https://www.gstatic.com/firebasejs/10.14.1/firebase-database.js";
 
 const fbApp = initializeApp(window.FIREBASE_CONFIG);
 const auth = getAuth(fbApp);
@@ -44,6 +45,7 @@ const QUICK_REACTIONS = ["❤️", "👍", "🔥", "😂", "😮", "😢"];
 const ONLINE_WINDOW = 70e3; // «в сети», если lastSeen свежее этого
 // Сигнальная шина на RTDB: пишем «в чате что-то произошло», чтобы ПК-клиент не опрашивал Firestore
 const RTDB = "https://sandygram-a3b42-default-rtdb.europe-west1.firebasedatabase.app";
+const rtdb = getDatabase(fbApp, RTDB);
 async function bumpChat(chatId) {
   try {
     const t = await auth.currentUser.getIdToken();
@@ -313,7 +315,171 @@ function showMessenger() {
   maybeJoinInvite();
   initWebPush();
   subscribeStories();
+  listenIncomingCalls();
 }
+
+// ================================================================ ЗВОНКИ (WebRTC, сигналинг через RTDB)
+const ICE_SERVERS = [
+  { urls: "stun:stun.l.google.com:19302" },
+  { urls: "turn:openrelay.metered.ca:80", username: "openrelayproject", credential: "openrelayproject" },
+];
+let pc = null;                 // RTCPeerConnection
+let localStream = null;
+let activeCall = null;         // { calleeUid, callId, isCaller, video }
+let callsListenerStarted = false;
+let incomingPending = null;    // { callId, data }
+
+function callPath(calleeUid, callId) { return `calls/${calleeUid}/${callId}`; }
+
+async function startCall(video) {
+  const v = currentView();
+  if (!v || v.type !== "private" || !v.peer) return;
+  if (activeCall) return toast("Уже идёт звонок");
+  try {
+    localStream = await navigator.mediaDevices.getUserMedia({ audio: true, video });
+  } catch { return toast("Нет доступа к микрофону/камере"); }
+  const callId = randomId(16);
+  activeCall = { calleeUid: v.peerUid, callId, isCaller: true, video };
+  openCallUI(v.peer, video, "Вызов…");
+  pc = new RTCPeerConnection({ iceServers: ICE_SERVERS });
+  localStream.getTracks().forEach(t => pc.addTrack(t, localStream));
+  $("#localVideo").srcObject = video ? localStream : null;
+  pc.ontrack = (e) => { $("#remoteVideo").srcObject = e.streams[0]; $("#callStatus").textContent = "Идёт разговор"; startCallTimer(); };
+  pc.onicecandidate = (e) => {
+    if (e.candidate) dbPush(dbRef(rtdb, `${callPath(v.peerUid, callId)}/iceFrom`), JSON.stringify(e.candidate)).catch(() => {});
+  };
+  const offer = await pc.createOffer();
+  await pc.setLocalDescription(offer);
+  await dbSet(dbRef(rtdb, callPath(v.peerUid, callId)), {
+    from: me.uid, fromName: me.displayName || me.username, fromAvatar: me.avatar || null, fromColor: me.avatarColor ?? 0,
+    video, offer: JSON.stringify(offer), status: "ringing", createdAt: Date.now(),
+  });
+  // ждём ответ и ICE от собеседника
+  onValue(dbRef(rtdb, `${callPath(v.peerUid, callId)}/answer`), async (snap) => {
+    const val = snap.val();
+    if (val && pc && !pc.currentRemoteDescription) await pc.setRemoteDescription(JSON.parse(val)).catch(() => {});
+  });
+  onChildAdded(dbRef(rtdb, `${callPath(v.peerUid, callId)}/iceTo`), (snap) => {
+    if (pc) pc.addIceCandidate(JSON.parse(snap.val())).catch(() => {});
+  });
+  onValue(dbRef(rtdb, `${callPath(v.peerUid, callId)}/status`), (snap) => {
+    const st = snap.val();
+    if (st === "declined") { toast("Звонок отклонён"); endCall(false); }
+    if (st === "ended" && activeCall) endCall(false);
+  });
+}
+
+function listenIncomingCalls() {
+  if (callsListenerStarted) return;
+  callsListenerStarted = true;
+  onChildAdded(dbRef(rtdb, `calls/${me.uid}`), (snap) => {
+    const data = snap.val();
+    if (!data || data.status !== "ringing" || Date.now() - (data.createdAt || 0) > 60e3) return;
+    if (activeCall) { dbUpdate(dbRef(rtdb, callPath(me.uid, snap.key)), { status: "declined" }).catch(() => {}); return; }
+    incomingPending = { callId: snap.key, data };
+    $("#incomingAvatar").innerHTML = avatarHtml(data.fromColor ?? 0, (data.fromName || "?")[0].toUpperCase(), data.fromAvatar);
+    $("#incomingName").textContent = data.fromName || "Звонок";
+    $("#incomingKind").textContent = data.video ? "Входящий видеозвонок" : "Входящий звонок";
+    $("#incomingCall").classList.remove("hidden");
+    // если за минуту не ответили — прячем
+    setTimeout(() => { if (incomingPending?.callId === snap.key) { $("#incomingCall").classList.add("hidden"); incomingPending = null; } }, 60e3);
+  });
+}
+
+$("#acceptBtn").addEventListener("click", async () => {
+  if (!incomingPending) return;
+  const { callId, data } = incomingPending;
+  incomingPending = null;
+  $("#incomingCall").classList.add("hidden");
+  try {
+    localStream = await navigator.mediaDevices.getUserMedia({ audio: true, video: !!data.video });
+  } catch { dbUpdate(dbRef(rtdb, callPath(me.uid, callId)), { status: "declined" }); return toast("Нет доступа к микрофону/камере"); }
+  activeCall = { calleeUid: me.uid, callId, isCaller: false, video: !!data.video };
+  openCallUI({ displayName: data.fromName, avatarColor: data.fromColor, avatar: data.fromAvatar }, !!data.video, "Соединение…");
+  pc = new RTCPeerConnection({ iceServers: ICE_SERVERS });
+  localStream.getTracks().forEach(t => pc.addTrack(t, localStream));
+  $("#localVideo").srcObject = data.video ? localStream : null;
+  pc.ontrack = (e) => { $("#remoteVideo").srcObject = e.streams[0]; $("#callStatus").textContent = "Идёт разговор"; startCallTimer(); };
+  pc.onicecandidate = (e) => {
+    if (e.candidate) dbPush(dbRef(rtdb, `${callPath(me.uid, callId)}/iceTo`), JSON.stringify(e.candidate)).catch(() => {});
+  };
+  await pc.setRemoteDescription(JSON.parse(data.offer));
+  const answer = await pc.createAnswer();
+  await pc.setLocalDescription(answer);
+  await dbUpdate(dbRef(rtdb, callPath(me.uid, callId)), { answer: JSON.stringify(answer), status: "accepted" });
+  onChildAdded(dbRef(rtdb, `${callPath(me.uid, callId)}/iceFrom`), (snap) => {
+    if (pc) pc.addIceCandidate(JSON.parse(snap.val())).catch(() => {});
+  });
+  onValue(dbRef(rtdb, `${callPath(me.uid, callId)}/status`), (snap) => {
+    if (snap.val() === "ended" && activeCall) endCall(false);
+  });
+});
+
+$("#declineBtn").addEventListener("click", () => {
+  if (!incomingPending) return;
+  dbUpdate(dbRef(rtdb, callPath(me.uid, incomingPending.callId)), { status: "declined" }).catch(() => {});
+  $("#incomingCall").classList.add("hidden");
+  incomingPending = null;
+});
+
+let callTimerInt = null;
+let callStartTs = 0;
+function startCallTimer() {
+  if (callTimerInt) return;
+  callStartTs = Date.now();
+  callTimerInt = setInterval(() => {
+    const sec = Math.floor((Date.now() - callStartTs) / 1000);
+    $("#callStatus").textContent = `${String(Math.floor(sec / 60)).padStart(2, "0")}:${String(sec % 60).padStart(2, "0")}`;
+  }, 1000);
+}
+
+function openCallUI(peer, video, status) {
+  $("#callAvatar").innerHTML = avatarHtml(peer.avatarColor ?? 0, (peer.displayName || "?")[0].toUpperCase(), peer.avatar);
+  $("#callName").textContent = peer.displayName || "";
+  $("#callStatus").textContent = status;
+  $("#camBtn").classList.toggle("hidden", !video);
+  $("#localVideo").style.display = video ? "block" : "none";
+  $("#muteBtn").classList.remove("off");
+  $("#camBtn").classList.remove("off");
+  $("#callOverlay").classList.remove("hidden");
+}
+
+function endCall(signal = true) {
+  if (signal && activeCall)
+    dbUpdate(dbRef(rtdb, callPath(activeCall.calleeUid, activeCall.callId)), { status: "ended" }).catch(() => {});
+  if (activeCall) {
+    const p = callPath(activeCall.calleeUid, activeCall.callId);
+    setTimeout(() => dbRemove(dbRef(rtdb, p)).catch(() => {}), 3000);
+  }
+  try { pc?.close(); } catch {}
+  pc = null;
+  localStream?.getTracks().forEach(t => t.stop());
+  localStream = null;
+  activeCall = null;
+  clearInterval(callTimerInt); callTimerInt = null;
+  $("#remoteVideo").srcObject = null;
+  $("#localVideo").srcObject = null;
+  $("#callOverlay").classList.add("hidden");
+}
+
+$("#hangupBtn").addEventListener("click", () => endCall(true));
+$("#muteBtn").addEventListener("click", () => {
+  if (!localStream) return;
+  const track = localStream.getAudioTracks()[0];
+  if (!track) return;
+  track.enabled = !track.enabled;
+  $("#muteBtn").classList.toggle("off", !track.enabled);
+});
+$("#camBtn").addEventListener("click", () => {
+  if (!localStream) return;
+  const track = localStream.getVideoTracks()[0];
+  if (!track) return;
+  track.enabled = !track.enabled;
+  $("#camBtn").classList.toggle("off", !track.enabled);
+});
+$("#audioCallBtn").addEventListener("click", () => startCall(false));
+$("#videoCallBtn").addEventListener("click", () => startCall(true));
+window.addEventListener("beforeunload", () => { if (activeCall) endCall(true); });
 
 // ---------- истории ----------
 let stories = [];            // все живые истории
@@ -700,6 +866,8 @@ function renderConversationHeader() {
     sub.classList.add("online");
     return;
   }
+  $("#audioCallBtn").classList.toggle("hidden", v.type !== "private");
+  $("#videoCallBtn").classList.toggle("hidden", v.type !== "private");
   if (v.type === "saved") sub.textContent = "ваши заметки";
   else if (v.type === "channel") sub.textContent = `📢 канал · ${v.memberCount} подписчик(ов)`;
   else if (v.type === "group") {

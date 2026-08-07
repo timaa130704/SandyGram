@@ -17,7 +17,9 @@ import * as Notifications from "expo-notifications";
 import { useFonts } from "expo-font";
 import { MaterialIcons } from "@expo/vector-icons";
 import AsyncStorage from "@react-native-async-storage/async-storage";
-import { auth, db } from "./fire";
+import { auth, db, rtdb } from "./fire";
+import { ref as dbRef, onValue, onChildAdded, set as dbSet, update as dbUpdate, push as dbPush, remove as dbRemove } from "firebase/database";
+import { RTCPeerConnection, RTCView, mediaDevices } from "react-native-webrtc";
 import {
   createUserWithEmailAndPassword, signInWithEmailAndPassword, signOut, onAuthStateChanged,
   GoogleAuthProvider, signInWithCredential,
@@ -47,7 +49,7 @@ const AVATAR_TONES = ["#2b2b2b", "#3a3a3a", "#4a4a4a", "#5a5a5a", "#6b6b6b", "#7
 const ONLINE_WINDOW = 70e3;
 const QUICK_REACTIONS = ["❤️", "👍", "🔥", "😂", "😮", "😢"];
 const SITE = "https://sandygram-a3b42.web.app";
-const APP_VERSION = "1.4.0";
+const APP_VERSION = "2.0.0";
 const APK_URL = "https://github.com/timaa130704/SandyGram/releases/latest/download/SandyGram.apk";
 // Сигнальная шина RTDB — для мгновенного realtime у ПК-клиента
 const RTDB = "https://sandygram-a3b42-default-rtdb.europe-west1.firebasedatabase.app";
@@ -58,6 +60,10 @@ async function bumpChat(chatId) {
   } catch { }
 }
 // Коды стикеров OpenMoji — картинки лежат на хостинге сайта
+const ICE_SERVERS = [
+  { urls: "stun:stun.l.google.com:19302" },
+  { urls: "turn:openrelay.metered.ca:80", username: "openrelayproject", credential: "openrelayproject" },
+];
 const STICKERS = ["1F600","1F602","1F60D","1F60E","1F914","1F644","1F62D","1F621","1F973","1F97A","1F480","1F4A9","1F525","2764","1F44D","1F44E","1F44C","1F64F","1F4AA","1F440","1F389","1F680","26A1","1F31A","1F31D","1F63B","1F63C","1F998","1F984","1F37F"];
 
 const emailFor = (u) => `${u}@sandygram.app`;
@@ -211,6 +217,8 @@ function SandyGram() {
   const [myPrefs, setMyPrefs] = useState({ blocked: [], hideLastSeen: false });
   const [needName, setNeedName] = useState(null); // {uid, email, displayName, photoURL}
   const [stories, setStories] = useState([]);
+  const [call, setCall] = useState(null);        // { calleeUid, callId, isCaller, video, peerName, peerAvatar, peerColor, offer? }
+  const [incoming, setIncoming] = useState(null); // { callId, data }
 
   useEffect(() => { AsyncStorage.getItem("theme").then(v => v && setThemeName(v)); }, []);
   const toggleTheme = () => { const n = themeName === "dark" ? "light" : "dark"; setThemeName(n); AsyncStorage.setItem("theme", n); };
@@ -321,6 +329,25 @@ function SandyGram() {
     const sub = AppState.addEventListener("change", (s) => { if (s === "active") beat(); });
     return () => { clearInterval(t); sub.remove(); };
   }, [me?.uid]);
+
+  // ---- входящие звонки ----
+  useEffect(() => {
+    if (!me?.uid) return;
+    const unsub = onChildAdded(dbRef(rtdb, `calls/${me.uid}`), (snap) => {
+      const data = snap.val();
+      if (!data || data.status !== "ringing" || Date.now() - (data.createdAt || 0) > 60e3) return;
+      setIncoming((cur) => cur ? cur : { callId: snap.key, data });
+    });
+    return () => unsub();
+  }, [me?.uid]);
+
+  const startCall = (peerUid, peer, video) => {
+    if (call) return;
+    setCall({
+      calleeUid: peerUid, callId: randomId(16), isCaller: true, video,
+      peerName: peer?.displayName || "Звонок", peerAvatar: peer?.avatar || null, peerColor: peer?.avatarColor ?? 0,
+    });
+  };
 
   // ---- истории ----
   useEffect(() => {
@@ -440,7 +467,7 @@ function SandyGram() {
 
   if (!booted) return <View style={{ flex: 1, backgroundColor: "#0a0a0a", alignItems: "center", justifyContent: "center" }}><ActivityIndicator color="#888" /></View>;
 
-  const ctx = { T, me, setMe, chats, users, viewOf, fetchUser, screen, setScreen, themeName, toggleTheme, openDmWith, openDmByName, joinByCode, myPrefs, setMyPrefs, stories };
+  const ctx = { T, me, setMe, chats, users, viewOf, fetchUser, screen, setScreen, themeName, toggleTheme, openDmWith, openDmByName, joinByCode, myPrefs, setMyPrefs, stories, startCall };
   return (
     <View style={{ flex: 1, backgroundColor: T.bg }}>
       <StatusBar style={themeName === "dark" ? "light" : "dark"} />
@@ -448,6 +475,37 @@ function SandyGram() {
         : !me ? <AuthScreen ctx={ctx} />
           : screen.name === "chat" ? <ChatScreen key={screen.chatId} ctx={ctx} chatId={screen.chatId} />
             : <ListScreen ctx={ctx} />}
+      {call && me && <CallScreen T={T} me={me} call={call} onEnd={() => setCall(null)} />}
+      {incoming && me && !call && (
+        <Modal transparent animationType="fade" onRequestClose={() => {}}>
+          <View style={{ flex: 1, backgroundColor: "#000000cc", alignItems: "center", justifyContent: "center" }}>
+            <View style={{ backgroundColor: T.surface, borderRadius: 28, padding: 36, alignItems: "center", minWidth: 280 }}>
+              <Avatar T={T} label={(incoming.data.fromName || "?")[0].toUpperCase()} color={incoming.data.fromColor ?? 0} photo={incoming.data.fromAvatar} size={84} />
+              <Text style={{ color: T.text, fontSize: 20, fontWeight: "800", marginTop: 12 }}>{incoming.data.fromName}</Text>
+              <Text style={{ color: T.muted, marginTop: 2 }}>{incoming.data.video ? "Входящий видеозвонок" : "Входящий звонок"}</Text>
+              <View style={{ flexDirection: "row", gap: 44, marginTop: 26 }}>
+                <TouchableOpacity onPress={() => {
+                  dbUpdate(dbRef(rtdb, `calls/${me.uid}/${incoming.callId}`), { status: "declined" }).catch(() => { });
+                  setIncoming(null);
+                }} style={{ width: 60, height: 60, borderRadius: 30, backgroundColor: "#d23b3b", alignItems: "center", justifyContent: "center" }}>
+                  <MaterialIcons name="call-end" size={26} color="#fff" />
+                </TouchableOpacity>
+                <TouchableOpacity onPress={() => {
+                  const inc = incoming;
+                  setIncoming(null);
+                  setCall({
+                    calleeUid: me.uid, callId: inc.callId, isCaller: false, video: !!inc.data.video,
+                    peerName: inc.data.fromName, peerAvatar: inc.data.fromAvatar || null, peerColor: inc.data.fromColor ?? 0,
+                    offer: inc.data.offer,
+                  });
+                }} style={{ width: 60, height: 60, borderRadius: 30, backgroundColor: "#2e9e5b", alignItems: "center", justifyContent: "center" }}>
+                  <MaterialIcons name="call" size={26} color="#fff" />
+                </TouchableOpacity>
+              </View>
+            </View>
+          </View>
+        </Modal>
+      )}
     </View>
   );
 }
@@ -1508,6 +1566,16 @@ function ChatScreen({ ctx, chatId }) {
             <Text numberOfLines={1} style={{ color: typing.length || isOnlineUser(v.peer) ? T.text : T.muted, fontSize: 12.5 }}>{subtitle}</Text>
           </View>
         </TouchableOpacity>
+        {chat.type === "private" && (
+          <TouchableOpacity onPress={() => ctx.startCall(v.peerUid, v.peer, false)} style={{ padding: 6 }}>
+            <MaterialIcons name="call" size={22} color={T.text} />
+          </TouchableOpacity>
+        )}
+        {chat.type === "private" && (
+          <TouchableOpacity onPress={() => ctx.startCall(v.peerUid, v.peer, true)} style={{ padding: 6 }}>
+            <MaterialIcons name="videocam" size={22} color={T.text} />
+          </TouchableOpacity>
+        )}
         <TouchableOpacity onPress={() => { setSearchOpen(x => !x); setSearchText(""); }} style={{ padding: 6 }}>
           <MaterialIcons name="search" size={22} color={T.text} />
         </TouchableOpacity>
@@ -1847,6 +1915,143 @@ function MessageBubble({ T, m, mine, group, lastReadByOthers, saved, onLongPress
         </View>
       </TouchableOpacity>
     </Animated.View>
+  );
+}
+
+// ================================================================ ЭКРАН ЗВОНКА (WebRTC)
+function CallScreen({ T, me, call, onEnd }) {
+  const [status, setStatus] = useState(call.isCaller ? "Вызов…" : "Соединение…");
+  const [localUrl, setLocalUrl] = useState(null);
+  const [remoteUrl, setRemoteUrl] = useState(null);
+  const [muted, setMuted] = useState(false);
+  const [camOff, setCamOff] = useState(false);
+  const pcRef = useRef(null);
+  const streamRef = useRef(null);
+  const timerRef = useRef(null);
+  const startTs = useRef(0);
+  const path = `calls/${call.calleeUid}/${call.callId}`;
+
+  useEffect(() => {
+    let unsubs = [];
+    let alive = true;
+    (async () => {
+      try {
+        const stream = await mediaDevices.getUserMedia({ audio: true, video: call.video });
+        if (!alive) { stream.getTracks().forEach(t => t.stop()); return; }
+        streamRef.current = stream;
+        if (call.video) setLocalUrl(stream.toURL());
+        const pc = new RTCPeerConnection({ iceServers: ICE_SERVERS });
+        pcRef.current = pc;
+        stream.getTracks().forEach(t => pc.addTrack(t, stream));
+        pc.ontrack = (e) => {
+          if (e.streams && e.streams[0]) {
+            setRemoteUrl(e.streams[0].toURL());
+            if (!startTs.current) {
+              startTs.current = Date.now();
+              timerRef.current = setInterval(() => {
+                const sec = Math.floor((Date.now() - startTs.current) / 1000);
+                setStatus(`${String(Math.floor(sec / 60)).padStart(2, "0")}:${String(sec % 60).padStart(2, "0")}`);
+              }, 1000);
+            }
+          }
+        };
+        if (call.isCaller) {
+          pc.onicecandidate = (e) => { if (e.candidate) dbPush(dbRef(rtdb, `${path}/iceFrom`), JSON.stringify(e.candidate)).catch(() => { }); };
+          const offer = await pc.createOffer({});
+          await pc.setLocalDescription(offer);
+          await dbSet(dbRef(rtdb, path), {
+            from: me.uid, fromName: me.displayName || me.username, fromAvatar: me.avatar || null, fromColor: me.avatarColor ?? 0,
+            video: call.video, offer: JSON.stringify(offer), status: "ringing", createdAt: Date.now(),
+          });
+          unsubs.push(onValue(dbRef(rtdb, `${path}/answer`), async (snap) => {
+            const val = snap.val();
+            if (val && pcRef.current && !pcRef.current.remoteDescription) {
+              try { await pcRef.current.setRemoteDescription(JSON.parse(val)); } catch { }
+            }
+          }));
+          unsubs.push(onChildAdded(dbRef(rtdb, `${path}/iceTo`), (snap) => {
+            try { pcRef.current?.addIceCandidate(JSON.parse(snap.val())); } catch { }
+          }));
+        } else {
+          pc.onicecandidate = (e) => { if (e.candidate) dbPush(dbRef(rtdb, `${path}/iceTo`), JSON.stringify(e.candidate)).catch(() => { }); };
+          await pc.setRemoteDescription(JSON.parse(call.offer));
+          const answer = await pc.createAnswer();
+          await pc.setLocalDescription(answer);
+          await dbUpdate(dbRef(rtdb, path), { answer: JSON.stringify(answer), status: "accepted" });
+          unsubs.push(onChildAdded(dbRef(rtdb, `${path}/iceFrom`), (snap) => {
+            try { pcRef.current?.addIceCandidate(JSON.parse(snap.val())); } catch { }
+          }));
+        }
+        unsubs.push(onValue(dbRef(rtdb, `${path}/status`), (snap) => {
+          const st = snap.val();
+          if (st === "declined") { setStatus("Отклонён"); setTimeout(hangup, 800); }
+          if (st === "ended") hangup(false);
+        }));
+      } catch (e) {
+        Alert.alert("Ошибка звонка", ruError(e));
+        hangup(true);
+      }
+    })();
+    return () => {
+      alive = false;
+      unsubs.forEach(u => { try { u(); } catch { } });
+    };
+  }, []);
+
+  const hangup = (signal = true) => {
+    if (signal) dbUpdate(dbRef(rtdb, path), { status: "ended" }).catch(() => { });
+    setTimeout(() => dbRemove(dbRef(rtdb, path)).catch(() => { }), 3000);
+    try { pcRef.current?.close(); } catch { }
+    streamRef.current?.getTracks().forEach(t => t.stop());
+    clearInterval(timerRef.current);
+    onEnd();
+  };
+
+  const toggleMute = () => {
+    const t = streamRef.current?.getAudioTracks()[0];
+    if (!t) return;
+    t.enabled = !t.enabled;
+    setMuted(!t.enabled);
+  };
+  const toggleCam = () => {
+    const t = streamRef.current?.getVideoTracks()[0];
+    if (!t) return;
+    t.enabled = !t.enabled;
+    setCamOff(!t.enabled);
+  };
+
+  return (
+    <Modal animationType="slide" onRequestClose={() => hangup(true)}>
+      <View style={{ flex: 1, backgroundColor: "#000" }}>
+        {remoteUrl && call.video
+          ? <RTCView streamURL={remoteUrl} style={{ flex: 1 }} objectFit="cover" />
+          : (
+            <View style={{ flex: 1, alignItems: "center", justifyContent: "center" }}>
+              <Avatar T={T} label={(call.peerName || "?")[0].toUpperCase()} color={call.peerColor} photo={call.peerAvatar} size={110} />
+            </View>
+          )}
+        {localUrl && call.video && (
+          <RTCView streamURL={localUrl} style={{ position: "absolute", top: 50, right: 16, width: 110, height: 160, borderRadius: 14 }} objectFit="cover" zOrder={1} />
+        )}
+        <View style={{ position: "absolute", top: 56, left: 0, right: 0, alignItems: "center" }}>
+          <Text style={{ color: "#fff", fontSize: 22, fontWeight: "800" }}>{call.peerName}</Text>
+          <Text style={{ color: "#ffffff99", marginTop: 4 }}>{status}</Text>
+        </View>
+        <View style={{ position: "absolute", bottom: 54, left: 0, right: 0, flexDirection: "row", justifyContent: "center", gap: 22 }}>
+          <TouchableOpacity onPress={toggleMute} style={{ width: 58, height: 58, borderRadius: 29, backgroundColor: muted ? "#ffffff10" : "#ffffff22", alignItems: "center", justifyContent: "center" }}>
+            <MaterialIcons name={muted ? "mic-off" : "mic"} size={24} color="#fff" />
+          </TouchableOpacity>
+          {call.video && (
+            <TouchableOpacity onPress={toggleCam} style={{ width: 58, height: 58, borderRadius: 29, backgroundColor: camOff ? "#ffffff10" : "#ffffff22", alignItems: "center", justifyContent: "center" }}>
+              <MaterialIcons name={camOff ? "videocam-off" : "videocam"} size={24} color="#fff" />
+            </TouchableOpacity>
+          )}
+          <TouchableOpacity onPress={() => hangup(true)} style={{ width: 58, height: 58, borderRadius: 29, backgroundColor: "#d23b3b", alignItems: "center", justifyContent: "center" }}>
+            <MaterialIcons name="call-end" size={26} color="#fff" />
+          </TouchableOpacity>
+        </View>
+      </View>
+    </Modal>
   );
 }
 
