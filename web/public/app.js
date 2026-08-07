@@ -278,7 +278,7 @@ $("#qrButton")?.addEventListener("click", async () => {
   await dbSet(node, { status: "pending", created: Date.now() });
   openModal(`<h3>Вход по QR-коду</h3>
     <p class="muted">В приложении SandyGram на телефоне откройте «Профиль» → «📷 Войти на компьютере по QR» и наведите камеру на этот экран.</p>
-    <div id="qrCode" style="display:flex;justify-content:center;padding:10px 0"></div>
+    <div id="qrCode" class="qr-frame" style="display:flex;justify-content:center"></div>
     <p class="muted" id="qrStatus">Ждём сканирования…</p>
     <div class="modal-actions"><button class="cancel">Отмена</button></div>`);
   const statusEl = $("#qrStatus");
