@@ -11,3 +11,4 @@ ping-key.txt
 desktop/bin/
 desktop/obj/
 desktop/publish/
+desktop/publish-x64/
