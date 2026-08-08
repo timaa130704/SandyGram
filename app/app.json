@@ -51,7 +51,8 @@
       "expo-audio",
       "@react-native-google-signin/google-signin",
       "expo-font",
-      "@config-plugins/react-native-webrtc"
+      "@config-plugins/react-native-webrtc",
+      "expo-secure-store"
     ],
     "notification": {
       "color": "#0a0a0a"

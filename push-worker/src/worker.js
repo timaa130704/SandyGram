@@ -248,6 +248,29 @@ export default {
         return json({ error: String(e) }, 500);
       }
     }
+    // Превью ссылок: GET /link-preview?url=... -> {url, title, desc, image}
+    if (request.method === "GET" && url.pathname === "/link-preview") {
+      try {
+        const target = (url.searchParams.get("url") || "").trim();
+        if (!/^https?:\/\//i.test(target)) return json({ error: "bad url" }, 400);
+        const ctrl = new AbortController();
+        const timer = setTimeout(() => ctrl.abort(), 6000);
+        let resp;
+        try {
+          resp = await fetch(target, { signal: ctrl.signal, redirect: "follow", headers: { "User-Agent": "Mozilla/5.0 (compatible; SandyGram LinkPreview)" } });
+        } finally { clearTimeout(timer); }
+        const html = await resp.text();
+        const og = (prop) => {
+          const re = new RegExp(`<meta[^>]+(?:property|name)=["']${prop}["'][^>]+content=["']([^"']*)["']`, "i");
+          const m = html.match(re);
+          return m ? m[1].replace(/&amp;/g, "&").trim() : "";
+        };
+        const title = og("og:title") || (html.match(/<title[^>]*>([^<]*)<\/title>/i) || [])[1]?.trim() || "";
+        const desc = og("og:description") || og("description");
+        const image = og("og:image") || og("twitter:image");
+        return json({ url: target, title: title.slice(0, 200), desc: desc.slice(0, 300), image: image.slice(0, 1000) });
+      } catch (e) { return json({ error: String(e) }, 502); }
+    }
     return new Response("SandyGram push worker", { status: 200, headers: CORS });
   },
 };

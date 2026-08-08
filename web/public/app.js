@@ -1263,6 +1263,7 @@ function buildMessageNode(message) {
     ${message.replyTo ? `<div class="reply-quote" data-target="${escapeHtml(message.replyTo.id)}"><b>${escapeHtml(message.replyTo.sender)}</b>${escapeHtml(message.replyTo.text)}</div>` : ""}
     ${message.image ? `<img class="photo" src="${escapeHtml(message.image)}" alt="Фото" loading="lazy" />` : ""}
     ${message.sticker ? `<img class="sticker-msg" src="/stickers/${escapeHtml(message.sticker)}.png" alt="Стикер" loading="lazy" />` : ""}
+    ${message.preview ? `<div class="link-preview"><a href="${escapeHtml(message.preview.url)}" target="_blank" rel="noopener noreferrer">${message.preview.image ? `<img src="${escapeHtml(message.preview.image)}" alt="" loading="lazy" onerror="this.style.display='none'" />` : ""}<span class="lp-body"><strong>${escapeHtml(message.preview.title || message.preview.url)}</strong>${message.preview.desc ? `<em>${escapeHtml(message.preview.desc)}</em>` : ""}</span></a></div>` : ""}
     ${message.voice ? `<span class="voice-wrap"><audio class="voice-msg" controls preload="metadata" src="${escapeHtml(message.voice.data)}"></audio><small class="voice-len">${message.voice.duration || 0} сек</small></span>` : ""}
     ${message.poll ? renderPollHtml(message) : ""}
     <span class="msg-text">${formatMessageText(message.text || "")}</span>
@@ -1358,6 +1359,15 @@ async function sendMessage({ text = "", image = null, sticker = null, voice = nu
       if (uid && uid !== me.uid && !mentionArr.includes(uid)) mentionArr.push(uid);
     }
     if (mentionArr.length) message.mentions = mentionArr;
+  }
+  // превью ссылки (через воркер)
+  const urlHit = (text || "").match(/https?:\/\/[^\s<]+/i);
+  if (urlHit && window.QR_WORKER_URL) {
+    try {
+      const clean = urlHit[0].replace(/[.,;:!?)]+$/, "");
+      const p = await fetch(`${window.QR_WORKER_URL}/link-preview?url=${encodeURIComponent(clean)}`).then(r => r.json()).catch(() => null);
+      if (p && p.title) message.preview = { url: clean, title: p.title, desc: p.desc || "", image: p.image || "" };
+    } catch { /* превью не критично */ }
   }
   const ref = doc(collection(dbf, "chats", chatId, "messages"));
   const previewText = message.text || (sticker ? "🧩 Стикер" : voice ? "🎤 Голосовое сообщение" : poll ? "📊 Опрос" : "");
@@ -1794,16 +1804,24 @@ function showChatContextMenu(point, v) {
 // ---------- forward ----------
 function openForwardPicker(message) {
   const views = [...chats.values()].map(viewOf);
-  const rows = views.map(c => `<button class="user-row" data-chat="${escapeHtml(c.id)}"><span class="avatar" data-color="${c.avatarColor}">${c.type === "saved" ? "☆" : escapeHtml((c.title || "?")[0].toUpperCase())}</span><span class="info"><strong>${escapeHtml(c.title)}</strong></span></button>`).join("");
-  openModal(`<h3>Переслать в…</h3><div class="user-results">${rows}</div><div class="modal-actions"><button class="cancel">Отмена</button></div>`);
+  const rows = views.map(c => `<label class="user-row" data-chat="${escapeHtml(c.id)}"><input type="checkbox" class="fwd-chk" value="${escapeHtml(c.id)}" /><span class="avatar" data-color="${c.avatarColor}">${c.type === "saved" ? "☆" : escapeHtml((c.title || "?")[0].toUpperCase())}</span><span class="info"><strong>${escapeHtml(c.title)}</strong></span></label>`).join("");
+  openModal(`<h3>Переслать в…</h3><div class="user-results">${rows}</div><div class="modal-actions"><button class="cancel">Отмена</button><button class="primary fwd-go" disabled>Переслать</button></div>`);
+  const go = $("#modal .fwd-go");
+  const update = () => {
+    const n = document.querySelectorAll("#modal .fwd-chk:checked").length;
+    go.disabled = n === 0;
+    go.textContent = n ? `Переслать (${n})` : "Переслать";
+  };
+  document.querySelectorAll("#modal .fwd-chk").forEach(chk => chk.addEventListener("change", update));
   $("#modal .cancel").addEventListener("click", closeModal);
-  document.querySelectorAll("#modal .user-row").forEach(row => row.addEventListener("click", async () => {
+  go.addEventListener("click", async () => {
+    const ids = [...document.querySelectorAll("#modal .fwd-chk:checked")].map(c => c.value);
     closeModal();
     try {
-      await sendMessage({ text: message.text || "", image: message.image || null, toChatId: row.dataset.chat, forwardedFrom: message.senderName });
-      toast("Переслано");
+      for (const id of ids) await sendMessage({ text: message.text || "", image: message.image || null, toChatId: id, forwardedFrom: message.senderName });
+      toast(ids.length === 1 ? "Переслано" : `Переслано в ${ids.length} чатов`);
     } catch (error) { toast(ruError(error)); }
-  }));
+  });
 }
 
 // ---------- профиль / настройки ----------

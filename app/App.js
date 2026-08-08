@@ -20,6 +20,8 @@ import AsyncStorage from "@react-native-async-storage/async-storage";
 import { auth, db, rtdb } from "./fire";
 import { ref as dbRef, onValue, onChildAdded, set as dbSet, update as dbUpdate, push as dbPush, remove as dbRemove } from "firebase/database";
 import { CameraView, useCameraPermissions } from "expo-camera";
+import * as SecureStore from "expo-secure-store";
+import * as LocalAuthentication from "expo-local-authentication";
 import { RTCPeerConnection, RTCView, mediaDevices } from "react-native-webrtc";
 import {
   createUserWithEmailAndPassword, signInWithEmailAndPassword, signOut, onAuthStateChanged,
@@ -50,6 +52,7 @@ const AVATAR_TONES = ["#f3edff", "#e8ddfd", "#dccffb", "#cfc0f8", "#c2b1f4", "#b
 const ONLINE_WINDOW = 70e3;
 const QUICK_REACTIONS = ["❤️", "👍", "🔥", "😂", "😮", "😢"];
 const SITE = "https://sandygram-a3b42.web.app";
+const LINK_WORKER = "https://sandygram-push.sandygram.workers.dev";
 const APP_VERSION = "2.4.0";
 const APK_URL = "https://github.com/timaa130704/SandyGram/releases/latest/download/SandyGram.apk";
 // Сигнальная шина RTDB — для мгновенного realtime у ПК-клиента
@@ -251,10 +254,70 @@ export default function Root() {
   );
 }
 
+// Экран блокировки: пин-код (4 цифры) или биометрия
+function PinLock({ T, mode, onUnlock, onSkip }) {
+  const [pin, setPin] = useState("");
+  const [confirm, setConfirm] = useState(false);
+  const [err, setErr] = useState("");
+  const submit = async () => {
+    if (pin.length < 4) return;
+    setErr("");
+    if (mode === "setup") {
+      if (!confirm) { setConfirm(true); setPin(""); return; }
+      try { await SecureStore.setItemAsync("sandy_pin", pin); onUnlock(); }
+      catch { setErr("Не удалось сохранить пин-код"); }
+    } else {
+      const stored = await SecureStore.getItemAsync("sandy_pin").catch(() => null);
+      if (stored && pin === stored) onUnlock();
+      else { setErr("Неверный пин-код"); setPin(""); }
+    }
+  };
+  const bio = async () => {
+    try {
+      const hw = await LocalAuthentication.hasHardwareAsync();
+      const en = await LocalAuthentication.isEnrolledAsync();
+      if (hw && en) {
+        const r = await LocalAuthentication.authenticateAsync({ promptMessage: "Разблокируйте SandyGram" });
+        if (r.success) onUnlock();
+      } else setErr("Биометрия недоступна — введите пин-код");
+    } catch { setErr("Биометрия недоступна — введите пин-код"); }
+  };
+  return (
+    <View style={{ ...StyleSheet.absoluteFillObject, backgroundColor: T.bg, zIndex: 999, alignItems: "center", justifyContent: "center", padding: 30 }}>
+      <Text style={{ fontSize: 34, marginBottom: 8 }}>🔒</Text>
+      <Text style={{ color: T.text, fontSize: 18, fontWeight: "800", marginBottom: 18, textAlign: "center" }}>
+        {mode === "setup" ? (confirm ? "Повторите пин-код" : "Придумайте пин-код (4 цифры)") : "Введите пин-код"}
+      </Text>
+      <TextInput
+        value={pin}
+        onChangeText={(t) => { setPin(t.replace(/\D/g, "").slice(0, 4)); if (err) setErr(""); }}
+        keyboardType="number-pad" secureTextEntry maxLength={4} autoFocus
+        style={{ width: 160, textAlign: "center", fontSize: 26, letterSpacing: 14, color: T.text, backgroundColor: T.surface, borderRadius: 14, paddingVertical: 10 }}
+      />
+      {!!err && <Text style={{ color: T.danger, marginTop: 10, textAlign: "center", fontSize: 13 }}>{err}</Text>}
+      <View style={{ flexDirection: "row", gap: 12, marginTop: 24 }}>
+        {mode === "enter" && (
+          <TouchableOpacity onPress={bio} style={{ padding: 13, borderRadius: 999, backgroundColor: T.surface2 }}>
+            <Text style={{ color: T.text, fontWeight: "700" }}>👆 Биометрия</Text>
+          </TouchableOpacity>
+        )}
+        <TouchableOpacity onPress={submit} style={{ padding: 13, borderRadius: 999, backgroundColor: T.inverse }}>
+          <Text style={{ color: T.onInverse, fontWeight: "800" }}>{mode === "setup" ? (confirm ? "Готово" : "Далее") : "Войти"}</Text>
+        </TouchableOpacity>
+      </View>
+      <TouchableOpacity onPress={onSkip} style={{ marginTop: 20, padding: 10 }}>
+        <Text style={{ color: T.muted, fontSize: 13 }}>{mode === "setup" ? "Пропустить" : "Выйти из аккаунта"}</Text>
+      </TouchableOpacity>
+    </View>
+  );
+}
+
 function SandyGram() {
   const [themeName, setThemeName] = useState("dark");
   const T = THEMES[themeName];
   const [booted, setBooted] = useState(false);
+  const [pinLocked, setPinLocked] = useState(false);
+  const [pinSetup, setPinSetup] = useState(false);
   const [me, setMe] = useState(null);
   const [chats, setChats] = useState(new Map());
   const [users, setUsers] = useState(new Map());
@@ -307,7 +370,7 @@ function SandyGram() {
 
   // ---- auth (с восстановлением оборванной регистрации) ----
   useEffect(() => onAuthStateChanged(auth, async (user) => {
-    if (!user) { setMe(null); setNeedName(null); setChats(new Map()); setBooted(true); return; }
+    if (!user) { setMe(null); setNeedName(null); setChats(new Map()); setPinLocked(false); setPinSetup(false); setBooted(true); return; }
     let profile = null;
     for (let i = 0; i < 5 && !profile; i++) {
       try {
@@ -328,7 +391,10 @@ function SandyGram() {
         }
       } catch { }
     }
-    if (profile) { setNeedName(null); setMe(profile); }
+    if (profile) { setNeedName(null); setMe(profile); SecureStore.getItemAsync("sandy_pin").then(pin => {
+      if (pin) setPinLocked(true);
+      else SecureStore.getItemAsync("sandy_pin_asked").then(asked => { if (!asked) { setPinSetup(true); SecureStore.setItemAsync("sandy_pin_asked", "1").catch(() => {}); } });
+    }).catch(() => {}); }
     else setNeedName({ uid: user.uid, email: user.email, displayName: user.displayName, photoURL: user.photoURL });
     setBooted(true);
   }), []);
@@ -554,6 +620,8 @@ function SandyGram() {
           </View>
         </Modal>
       )}
+      {pinLocked && <PinLock T={T} mode="enter" onUnlock={() => setPinLocked(false)} onSkip={async () => { try { await signOut(auth); } catch {} setPinLocked(false); }} />}
+      {pinSetup && !pinLocked && <PinLock T={T} mode="setup" onUnlock={() => setPinSetup(false)} onSkip={() => setPinSetup(false)} />}
     </View>
   );
 }
@@ -1374,6 +1442,7 @@ function ChatScreen({ ctx, chatId }) {
   const [editTarget, setEditTarget] = useState(null);
   const [menuMsg, setMenuMsg] = useState(null);
   const [forwardMsg, setForwardMsg] = useState(null);
+  const [forwardSel, setForwardSel] = useState(new Set());
   const [photoView, setPhotoView] = useState(null);
   const [infoOpen, setInfoOpen] = useState(false);
   const [topicMenu, setTopicMenu] = useState(null);
@@ -1497,6 +1566,15 @@ function ChatScreen({ ctx, chatId }) {
       const re = /@([a-z0-9_]{3,24})\b/gi;
       let mt; while ((mt = re.exec(textBody))) { const uid = map.get(mt[1].toLowerCase()); if (uid && uid !== me.uid && !arr.includes(uid)) arr.push(uid); }
       if (arr.length) msg.mentions = arr;
+    }
+    // превью ссылки (через воркер)
+    const urlHit = (textBody || "").match(/https?:\/\/[^\s<]+/i);
+    if (urlHit && LINK_WORKER) {
+      try {
+        const clean = urlHit[0].replace(/[.,;:!?)]+$/, "");
+        const p = await fetch(`${LINK_WORKER}/link-preview?url=${encodeURIComponent(clean)}`).then(r => r.json()).catch(() => null);
+        if (p && p.title) msg.preview = { url: clean, title: p.title, desc: p.desc || "", image: p.image || "" };
+      } catch { /* превью не критично */ }
     }
     const previewText = msg.text || (sticker ? "🧩 Стикер" : voice ? "🎤 Голосовое сообщение" : poll ? "📊 Опрос" : "");
     const patch = {
@@ -1987,26 +2065,37 @@ function ChatScreen({ ctx, chatId }) {
         </Modal>
       )}
 
-      {/* пересылка */}
+      {/* пересылка (мультивыбор) */}
       {forwardMsg && (
-        <Modal transparent animationType="slide" onRequestClose={() => setForwardMsg(null)}>
-          <TouchableOpacity activeOpacity={1} onPress={() => setForwardMsg(null)} style={{ flex: 1, backgroundColor: "#0008" }} />
+        <Modal transparent animationType="slide" onRequestClose={() => { setForwardMsg(null); setForwardSel(new Set()); }}>
+          <TouchableOpacity activeOpacity={1} onPress={() => { setForwardMsg(null); setForwardSel(new Set()); }} style={{ flex: 1, backgroundColor: "#0008" }} />
           <View style={{ backgroundColor: T.surface, borderTopLeftRadius: 28, borderTopRightRadius: 28, padding: 20, paddingBottom: 34, maxHeight: "70%" }}>
             <Text style={{ color: T.text, fontSize: 18, fontWeight: "800", marginBottom: 10 }}>Переслать в…</Text>
             <ScrollView>
-              {[...chats.values()].map(viewOf).map(c => (
-                <TouchableOpacity key={c.id} style={{ flexDirection: "row", alignItems: "center", gap: 12, paddingVertical: 8 }}
-                  onPress={async () => {
-                    const msg = forwardMsg; setForwardMsg(null);
-                    try {
-                      await sendTo(c.raw, { textBody: msg.text || "", image: msg.image || null, forwardedFrom: msg.senderName });
-                    } catch (e) { Alert.alert("Ошибка", ruError(e)); }
-                  }}>
-                  <Avatar T={T} label={c.type === "saved" ? "☆" : (c.title || "?")[0].toUpperCase()} color={c.avatarColor} size={44} />
-                  <Text style={{ color: T.text, fontWeight: "700" }}>{c.title}</Text>
-                </TouchableOpacity>
-              ))}
+              {[...chats.values()].map(viewOf).map(c => {
+                const on = forwardSel.has(c.id);
+                return (
+                  <TouchableOpacity key={c.id} style={{ flexDirection: "row", alignItems: "center", gap: 12, paddingVertical: 8 }}
+                    onPress={() => { const n = new Set(forwardSel); if (n.has(c.id)) n.delete(c.id); else n.add(c.id); setForwardSel(n); }}>
+                    <View style={{ width: 22, height: 22, borderRadius: 5, borderWidth: 2, borderColor: T.inverse, alignItems: "center", justifyContent: "center", backgroundColor: on ? T.inverse : "transparent" }}>
+                      {on && <Text style={{ color: T.onInverse, fontSize: 13, fontWeight: "800" }}>✓</Text>}
+                    </View>
+                    <Avatar T={T} label={c.type === "saved" ? "☆" : (c.title || "?")[0].toUpperCase()} color={c.avatarColor} size={44} />
+                    <Text style={{ color: T.text, fontWeight: "700", flex: 1 }}>{c.title}</Text>
+                  </TouchableOpacity>
+                );
+              })}
             </ScrollView>
+            <TouchableOpacity disabled={forwardSel.size === 0} onPress={async () => {
+              const msg = forwardMsg; const ids = [...forwardSel];
+              setForwardMsg(null); setForwardSel(new Set());
+              try {
+                for (const id of ids) await sendTo(chats.get(id), { textBody: msg.text || "", image: msg.image || null, forwardedFrom: msg.senderName });
+                if (ids.length > 1) Alert.alert("", `Переслано в ${ids.length} чатов`);
+              } catch (e) { Alert.alert("Ошибка", ruError(e)); }
+            }} style={{ marginTop: 12, padding: 14, borderRadius: 999, backgroundColor: forwardSel.size ? T.inverse : T.surface2, alignItems: "center", opacity: forwardSel.size ? 1 : 0.6 }}>
+              <Text style={{ color: forwardSel.size ? T.onInverse : T.muted, fontWeight: "800" }}>{forwardSel.size ? `Переслать (${forwardSel.size})` : "Переслать"}</Text>
+            </TouchableOpacity>
           </View>
         </Modal>
       )}
@@ -2148,6 +2237,15 @@ function MessageBubble({ T, m, mine, group, lastReadByOthers, saved, onLongPress
             </TouchableOpacity>
           )}
           {m.sticker && <Image source={{ uri: `${SITE}/stickers/${m.sticker}.png` }} style={{ width: 140, height: 140 }} />}
+          {m.preview && (
+            <TouchableOpacity onPress={() => Linking.openURL(m.preview.url)} style={{ marginTop: 6, borderRadius: 12, overflow: "hidden", borderWidth: 1, borderColor: mine ? T.onInverse + "44" : T.muted + "44", backgroundColor: mine ? T.inverse : T.bubbleIn, alignSelf: "flex-start", maxWidth: 230 }}>
+              {!!m.preview.image && <Image source={{ uri: m.preview.image }} style={{ width: 230, height: 120 }} resizeMode="cover" />}
+              <View style={{ padding: 8 }}>
+                <Text numberOfLines={2} style={{ color: mine ? T.onInverse : T.text, fontWeight: "700", fontSize: 13 }}>{m.preview.title || m.preview.url}</Text>
+                {!!m.preview.desc && <Text numberOfLines={2} style={{ color: mine ? T.onInverse : T.muted, fontSize: 12, marginTop: 2 }}>{m.preview.desc}</Text>}
+              </View>
+            </TouchableOpacity>
+          )}
           {m.poll && (
             <View style={{ minWidth: 220, marginVertical: 4 }}>
               <Text style={{ color: mine ? T.onInverse : T.text, fontWeight: "700", marginBottom: 8 }}>📊 {m.poll.question}</Text>
