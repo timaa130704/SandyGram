@@ -1,0 +1,55 @@
+  name: Build Windows client
+
+  on:
+    workflow_dispatch:
+      inputs:
+        release_tag:
+          description: "Attach SandyGram.exe to release with this tag (empty = artifact only)"
+          required: false
+          default: ""
+    push:
+      tags:
+        - "v*"
+
+  permissions:
+    contents: write
+
+  jobs:
+    build:
+      runs-on: windows-latest
+      steps:
+        - name: Checkout
+          uses: actions/checkout@v4
+  
+        - name: Setup .NET 8
+          uses: actions/setup-dotnet@v4
+          with:
+            dotnet-version: "8.0.x"
+
+        - name: Publish (self-contained single-file)
+          shell: pwsh
+          run: |
+            dotnet publish desktop/SandyGram.csproj `
+              -c Release -r win-x64 --self-contained true `
+              -p:PublishSingleFile=true `
+              -p:IncludeNativeLibrariesForSelfExtract=true `
+              -p:EnableCompressionInSingleFile=true `
+              -o publish_out
+            if (-not (Test-Path publish_out/SandyGram.exe)) {
+              throw "SandyGram.exe not found in publish_out"
+            }
+            Get-Item publish_out/SandyGram.exe | Select-Object Name, Length
+  
+        - name: Upload build artifact
+          uses: actions/upload-artifact@v4
+          with:
+            name: SandyGram-win-x64
+            path: publish_out/SandyGram.exe
+            if-no-files-found: error
+  
+        - name: Attach to release (only if release_tag provided)
+          if: ${{ github.event_name == 'workflow_dispatch' && inputs.release_tag != '' }}
+          shell: pwsh
+          env:
+            GH_TOKEN: ${{ github.token }}
+          run: gh release upload "${{ inputs.release_tag }}" publish_out/SandyGram.exe --clobber
