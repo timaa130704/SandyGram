@@ -220,6 +220,13 @@ public static class Fire
         var rnd = Random.Shared;
         return new string(Enumerable.Range(0, len).Select(_ => chars[rnd.Next(chars.Length)]).ToArray());
     }
+
+    // криптостойкий токен (hex) — для QR-логина, где значение должно быть неугадываемым
+    public static string SecureToken(int bytes = 16)
+    {
+        var buf = System.Security.Cryptography.RandomNumberGenerator.GetBytes(bytes);
+        return Convert.ToHexString(buf).ToLowerInvariant();
+    }
 }
 
 public class FireException : Exception

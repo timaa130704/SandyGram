@@ -3,7 +3,9 @@
 
 const PROJECT = "sandygram-a3b42";
 const FS_BASE = `https://firestore.googleapis.com/v1/projects/${PROJECT}/databases/(default)/documents`;
+const RTDB_BASE = "https://sandygram-a3b42-default-rtdb.europe-west1.firebasedatabase.app";
 const ONLINE_WINDOW = 70e3;
+const QRLOGIN_TTL = 5 * 60e3; // refresh-токены в qrlogin не должны залёживаться дольше 5 минут
 
 // ---------- OAuth из сервисного аккаунта (WebCrypto) ----------
 let cachedToken = null; // { token, exp }
@@ -16,7 +18,7 @@ async function accessToken(env) {
   const now = Math.floor(Date.now() / 1000);
   const unsigned = `${b64urlJson({ alg: "RS256", typ: "JWT" })}.${b64urlJson({
     iss: sa.client_email,
-    scope: "https://www.googleapis.com/auth/datastore https://www.googleapis.com/auth/firebase.messaging",
+    scope: "https://www.googleapis.com/auth/datastore https://www.googleapis.com/auth/firebase.messaging https://www.googleapis.com/auth/firebase.database",
     aud: "https://oauth2.googleapis.com/token", iat: now, exp: now + 3600,
   })}`;
   // PEM → CryptoKey
@@ -103,11 +105,14 @@ async function tick(env) {
   const lastRun = meta?.lastRun || (Date.now() - 120e3);
   const startedAt = Date.now();
 
-  // чаты с новыми сообщениями
+  // чаты с новыми сообщениями (по возрастанию времени — чтобы при переполнении лимита
+  // обрабатывать самые старые и безопасно продвигать метку lastRun, ничего не теряя)
+  const PAGE = 200;
   const chats = await runQuery(H, {
     from: [{ collectionId: "chats" }],
     where: { fieldFilter: { field: { fieldPath: "lastMessage.createdAt" }, op: "GREATER_THAN", value: { integerValue: String(lastRun) } } },
-    limit: 50,
+    orderBy: [{ field: { fieldPath: "lastMessage.createdAt" }, direction: "ASCENDING" }],
+    limit: PAGE,
   });
 
   const userCache = new Map();
@@ -139,7 +144,7 @@ async function tick(env) {
     for (const uid of chat.members || []) {
       if (uid === lm.senderUid) continue;
       if (mentioned.has(uid)) continue; // уже уведомили об упоминании
-      if ((chat.unread || {})[uid] > 0 === false) continue;
+      if (!((chat.unread || {})[uid] > 0)) continue;
       if ((chat.muted || []).includes(uid)) continue;
       const user = await getUser(uid);
       if (!user || !Array.isArray(user.fcmTokens) || !user.fcmTokens.length) continue;
@@ -150,6 +155,23 @@ async function tick(env) {
       sent += await sendToTokens(H, user, { title, body, chatId: chat.id });
     }
   }
+
+  // Чистим просроченные QR-логины: в узлах qrlogin лежит refresh-токен телефона,
+  // поэтому мёртвые/использованные записи удаляем каждую минуту (сервисный токен обходит правила RTDB).
+  let qrCleaned = 0;
+  try {
+    const all = await fetch(`${RTDB_BASE}/qrlogin.json?access_token=${token}`).then(r => r.json()).catch(() => null);
+    if (all && typeof all === "object") {
+      const cutoff = startedAt - QRLOGIN_TTL;
+      for (const [node, v] of Object.entries(all)) {
+        const ts = (v && (v.at || v.created)) || 0;
+        if (ts < cutoff) {
+          await fetch(`${RTDB_BASE}/qrlogin/${encodeURIComponent(node)}.json?access_token=${token}`, { method: "DELETE" }).catch(() => {});
+          qrCleaned++;
+        }
+      }
+    }
+  } catch (e) { console.error("qr cleanup:", String(e)); }
 
   // раз в час чистим просроченные истории
   let cleaned = 0;
@@ -169,12 +191,16 @@ async function tick(env) {
     });
   }
 
-  // сохраняем отметку
+  // сохраняем отметку. Если упёрлись в лимит страницы — двигаем метку только до времени
+  // последнего обработанного чата (список по возрастанию), чтобы не пропустить более новые.
+  const newLastRun = chats.length >= PAGE
+    ? Math.max(lastRun, ...chats.map(c => (c.lastMessage || {}).createdAt || 0))
+    : startedAt;
   await fetch(`${FS_BASE}/meta/push?updateMask.fieldPaths=lastRun`, {
     method: "PATCH", headers: H,
-    body: JSON.stringify({ fields: { lastRun: { integerValue: String(startedAt) } } }),
+    body: JSON.stringify({ fields: { lastRun: { integerValue: String(newLastRun) } } }),
   });
-  return { chats: chats.length, sent, cleaned };
+  return { chats: chats.length, sent, cleaned, qrCleaned };
 }
 
 // ---------- QR-вход: refresh-токен → Firebase Custom Token ----------
@@ -212,6 +238,49 @@ async function customToken(env, uid) {
   const key = await crypto.subtle.importKey("pkcs8", der, { name: "RSASSA-PKCS1-v1_5", hash: "SHA-256" }, false, ["sign"]);
   const sig = await crypto.subtle.sign("RSASSA-PKCS1-v1_5", key, enc.encode(unsigned));
   return `${unsigned}.${b64url(sig)}`;
+}
+
+// Защита от SSRF: пускаем превью только на публичные http(s)-хосты,
+// блокируя localhost, .local/.internal и приватные/loopback/link-local IP-адреса.
+function isSafePreviewUrl(target) {
+  let u;
+  try { u = new URL(target); } catch { return false; }
+  if (u.protocol !== "http:" && u.protocol !== "https:") return false;
+  const host = u.hostname.toLowerCase().replace(/^\[|\]$/g, "");
+  if (host === "localhost" || host === "0.0.0.0" || host === "::" || host === "::1"
+      || host.endsWith(".local") || host.endsWith(".internal")) return false;
+  if (/^\d{1,3}(\.\d{1,3}){3}$/.test(host)) {
+    const p = host.split(".").map(Number);
+    if (p.some(n => n > 255)) return false;
+    if (p[0] === 0 || p[0] === 10 || p[0] === 127) return false;
+    if (p[0] === 169 && p[1] === 254) return false;              // link-local
+    if (p[0] === 172 && p[1] >= 16 && p[1] <= 31) return false;  // private
+    if (p[0] === 192 && p[1] === 168) return false;              // private
+    if (p[0] === 100 && p[1] >= 64 && p[1] <= 127) return false; // CGNAT
+    return true;
+  }
+  if (host.includes(":")) { // literal IPv6 — режем loopback/ULA/link-local
+    if (host.startsWith("fc") || host.startsWith("fd") || host.startsWith("fe8")
+        || host.startsWith("fe9") || host.startsWith("fea") || host.startsWith("feb")) return false;
+  }
+  return true;
+}
+
+// Ограниченное по объёму чтение тела ответа (og-теги живут в начале документа)
+async function readCapped(resp, maxBytes = 512 * 1024) {
+  const reader = resp.body?.getReader();
+  if (!reader) return (await resp.text()).slice(0, maxBytes);
+  const chunks = []; let total = 0;
+  for (;;) {
+    const { done, value } = await reader.read();
+    if (done) break;
+    chunks.push(value); total += value.length;
+    if (total >= maxBytes) { try { await reader.cancel(); } catch {} break; }
+  }
+  const buf = new Uint8Array(total);
+  let off = 0;
+  for (const c of chunks) { buf.set(c, off); off += c.length; }
+  return new TextDecoder("utf-8", { fatal: false }).decode(buf);
 }
 
 // CORS для браузера: QR-вход вызывается с веба (sandygram-a3b42.web.app) на workers.dev
@@ -252,14 +321,22 @@ export default {
     if (request.method === "GET" && url.pathname === "/link-preview") {
       try {
         const target = (url.searchParams.get("url") || "").trim();
-        if (!/^https?:\/\//i.test(target)) return json({ error: "bad url" }, 400);
+        if (!isSafePreviewUrl(target)) return json({ error: "bad url" }, 400);
         const ctrl = new AbortController();
         const timer = setTimeout(() => ctrl.abort(), 6000);
-        let resp;
+        let resp, current = target;
         try {
-          resp = await fetch(target, { signal: ctrl.signal, redirect: "follow", headers: { "User-Agent": "Mozilla/5.0 (compatible; SandyGram LinkPreview)" } });
+          // редиректы проверяем вручную — иначе через Location можно увести запрос на внутренний адрес
+          for (let hop = 0; hop < 4; hop++) {
+            resp = await fetch(current, { signal: ctrl.signal, redirect: "manual", headers: { "User-Agent": "Mozilla/5.0 (compatible; SandyGram LinkPreview)" } });
+            if (resp.status < 300 || resp.status >= 400) break;
+            const loc = resp.headers.get("location");
+            if (!loc) break;
+            current = new URL(loc, current).toString();
+            if (!isSafePreviewUrl(current)) return json({ error: "blocked redirect" }, 400);
+          }
         } finally { clearTimeout(timer); }
-        const html = await resp.text();
+        const html = await readCapped(resp);
         const og = (prop) => {
           const re = new RegExp(`<meta[^>]+(?:property|name)=["']${prop}["'][^>]+content=["']([^"']*)["']`, "i");
           const m = html.match(re);

@@ -53,7 +53,7 @@ const ONLINE_WINDOW = 70e3;
 const QUICK_REACTIONS = ["❤️", "👍", "🔥", "😂", "😮", "😢"];
 const SITE = "https://sandygram-a3b42.web.app";
 const LINK_WORKER = "https://sandygram-push.sandygram.workers.dev";
-const APP_VERSION = "2.4.0";
+const APP_VERSION = "2.5.1";
 const APK_URL = "https://github.com/timaa130704/SandyGram/releases/latest/download/SandyGram.apk";
 // Сигнальная шина RTDB — для мгновенного realtime у ПК-клиента
 const RTDB = "https://sandygram-a3b42-default-rtdb.europe-west1.firebasedatabase.app";
@@ -1505,12 +1505,17 @@ function ChatScreen({ ctx, chatId }) {
 
   useEffect(() => {
     const q = query(collection(db, "chats", chatId, "messages"), orderBy("createdAt", "desc"), limit(300));
+    let firstSnap = true;
     const unsub = onSnapshot(q, (snap) => {
       const list = snap.docs.map(d => ({ id: d.id, ...d.data() }));
       setMessages(list);
-      const mine = lastMentionAckRef.current
-        ? list.find(m => (m.mentions || []).includes(me.uid) && m.sender !== me.uid && (m.createdAt || 0) > lastMentionAckRef.current)
-        : null;
+      if (firstSnap) {
+        // базовая отметка по последнему сообщению — не показываем баннер на историю
+        firstSnap = false;
+        lastMentionAckRef.current = list.reduce((mx, m) => Math.max(mx, m.createdAt || 0), 0);
+        return;
+      }
+      const mine = list.find(m => (m.mentions || []).includes(me.uid) && m.sender !== me.uid && (m.createdAt || 0) > lastMentionAckRef.current);
       if (mine) {
         lastMentionAckRef.current = mine.createdAt || Date.now();
         setMentionBanner(mine);
@@ -1988,7 +1993,7 @@ function ChatScreen({ ctx, chatId }) {
                 <Text style={{ color: T.muted, fontSize: 12, backgroundColor: T.surface, paddingHorizontal: 12, paddingVertical: 4, borderRadius: 999, overflow: "hidden" }}>{fmtDay(item.ts)}</Text>
               </View>
             ) : (
-              <MessageBubble T={T} m={item.m} mine={item.m.sender === me.uid}
+              <MessageBubble T={T} m={item.m} mine={item.m.sender === me.uid} meUid={me.uid}
                 group={chat.type === "group"} lastReadByOthers={lastReadByOthers} saved={chat.type === "saved"}
                 onLongPress={() => setMenuMsg(item.m)} onPhoto={() => setPhotoView(item.m.image)}
                 onDoubleTap={() => toggleReaction(item.m, "❤️")}
@@ -2144,11 +2149,15 @@ function ChatScreen({ ctx, chatId }) {
             { key: "o2", placeholder: "Вариант 2" },
             { key: "o3", placeholder: "Вариант 3 (необязательно)" },
             { key: "o4", placeholder: "Вариант 4 (необязательно)" },
+            { key: "o5", placeholder: "Вариант 5 (необязательно)" },
+            { key: "o6", placeholder: "Вариант 6 (необязательно)" },
+            { key: "o7", placeholder: "Вариант 7 (необязательно)" },
+            { key: "o8", placeholder: "Вариант 8 (необязательно)" },
           ]}
           onClose={() => setPollOpen(false)}
           onSubmit={async (v) => {
             const question = v.q.trim().slice(0, 120);
-            const options = [v.o1, v.o2, v.o3, v.o4].map(x => x.trim().slice(0, 60)).filter(Boolean)
+            const options = [v.o1, v.o2, v.o3, v.o4, v.o5, v.o6, v.o7, v.o8].map(x => (x || "").trim().slice(0, 60)).filter(Boolean)
               .map(text => ({ id: randomId(8), text }));
             if (!question || options.length < 2) return Alert.alert("", "Нужен вопрос и минимум 2 варианта");
             try { await sendTo(chat, { poll: { question, options, votes: {} } }); listRef.current?.scrollToOffset({ offset: 0, animated: true }); }
@@ -2189,7 +2198,7 @@ function ChatScreen({ ctx, chatId }) {
 }
 
 // ---------- пузырь сообщения (свайп вправо = ответить) ----------
-function MessageBubble({ T, m, mine, group, lastReadByOthers, saved, onLongPress, onPhoto, onDoubleTap, onSwipeReply, onMention, onInvite, onQuotePress, onVote }) {
+function MessageBubble({ T, m, mine, meUid, group, lastReadByOthers, saved, onLongPress, onPhoto, onDoubleTap, onSwipeReply, onMention, onInvite, onQuotePress, onVote }) {
   const lastTap = useRef(0);
   const read = mine && lastReadByOthers >= m.createdAt;
   const pan = useRef(new Animated.Value(0)).current;
@@ -2254,7 +2263,7 @@ function MessageBubble({ T, m, mine, group, lastReadByOthers, saved, onLongPress
                 const total = Object.keys(votes).length;
                 const cnt = Object.values(votes).filter(x => x === o.id).length;
                 const pct = total ? Math.round(cnt / total * 100) : 0;
-                const my = votes && Object.entries(votes).some(([u, x]) => x === o.id && u === (m._meUid || ""));
+                const my = votes && Object.entries(votes).some(([u, x]) => x === o.id && u === meUid);
                 return (
                   <TouchableOpacity key={o.id} onPress={() => onVote && onVote(m, o.id)}
                     style={{ borderWidth: 1, borderColor: mine ? T.onInverse : T.outline, borderRadius: 12, paddingVertical: 8, paddingHorizontal: 11, marginBottom: 6, overflow: "hidden" }}>
@@ -2314,6 +2323,7 @@ function CallScreen({ T, me, call, onEnd }) {
   useEffect(() => {
     let unsubs = [];
     let alive = true;
+    let ringTimer = null;
     (async () => {
       try {
         const stream = await mediaDevices.getUserMedia({ audio: true, video: call.video });
@@ -2327,6 +2337,7 @@ function CallScreen({ T, me, call, onEnd }) {
           if (e.streams && e.streams[0]) {
             setRemoteUrl(e.streams[0].toURL());
             if (!startTs.current) {
+              clearTimeout(ringTimer);
               startTs.current = Date.now();
               timerRef.current = setInterval(() => {
                 const sec = Math.floor((Date.now() - startTs.current) / 1000);
@@ -2352,6 +2363,8 @@ function CallScreen({ T, me, call, onEnd }) {
           unsubs.push(onChildAdded(dbRef(rtdb, `${path}/iceTo`), (snap) => {
             try { pcRef.current?.addIceCandidate(JSON.parse(snap.val())); } catch { }
           }));
+          // нет ответа за 45 секунд — сами кладём трубку
+          ringTimer = setTimeout(() => { if (alive && !startTs.current) { setStatus("Нет ответа"); hangup(true); } }, 45000);
         } else {
           pc.onicecandidate = (e) => { if (e.candidate) dbPush(dbRef(rtdb, `${path}/iceTo`), JSON.stringify(e.candidate)).catch(() => { }); };
           await pc.setRemoteDescription(JSON.parse(call.offer));
@@ -2374,6 +2387,7 @@ function CallScreen({ T, me, call, onEnd }) {
     })();
     return () => {
       alive = false;
+      clearTimeout(ringTimer);
       unsubs.forEach(u => { try { u(); } catch { } });
     };
   }, []);

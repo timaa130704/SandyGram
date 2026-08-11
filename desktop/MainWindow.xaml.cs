@@ -144,7 +144,7 @@ void QrBtn_Click(object sender, RoutedEventArgs e)
         QrStatus.Text = ""; QrPanel.Visibility = Visibility.Visible; QrBtn.IsEnabled = false;
         LoginBtn.IsEnabled = RegisterBtn.IsEnabled = false;
         qrCts?.Cancel(); qrCts = new System.Threading.CancellationTokenSource();
-        qrToken = Fire.RandomId(11);
+        qrToken = Fire.SecureToken(16);
         var payload = $"{Site}/qr/{qrToken}";
         _ = Fire.PutRtdbJsonAsync($"qrlogin/{qrToken}", new { status = "pending", created = DateTimeOffset.UtcNow.ToUnixTimeMilliseconds() }).ConfigureAwait(false);
         RenderQr(payload);

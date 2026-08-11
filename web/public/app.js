@@ -127,7 +127,7 @@ function fmtUntil(ms) {
 // Аватар: фото, если есть, иначе буква
 function avatarHtml(color, letter, photo, cls = "avatar") {
   const inner = photo ? `<img src="${escapeHtml(photo)}" alt="" />` : escapeHtml(letter);
-  return `<span class="${cls}" data-color="${color}">${inner}</span>`;
+  return `<span class="${cls}" data-color="${escapeHtml(color)}">${inner}</span>`;
 }
 
 // ---------- theme ----------
@@ -137,6 +137,11 @@ function applyTheme(theme) {
   const label = $("#themeLabel"); if (label) label.textContent = theme === "light" ? "светлая" : "тёмная";
 }
 applyTheme(localStorage.getItem("drigagram_theme") || "dark");
+// Битые превью-картинки прячем без inline-обработчиков (совместимо со строгим CSP)
+document.addEventListener("error", (e) => {
+  const t = e.target;
+  if (t && t.tagName === "IMG" && t.classList.contains("lp-img")) t.style.display = "none";
+}, true);
 
 // ---------- вью чата (title, peer, unread…) ----------
 function viewOf(chat) {
@@ -272,7 +277,7 @@ $("#qrButton")?.addEventListener("click", async () => {
     $("#authError").textContent = "QR-вход временно недоступен (не задан адрес воркера).";
     return;
   }
-  const qrToken = Math.random().toString(36).slice(2, 10) + Math.random().toString(36).slice(2, 10);
+  const qrToken = Array.from(crypto.getRandomValues(new Uint8Array(16)), (b) => b.toString(16).padStart(2, "0")).join("");
   const url = `${location.origin}/qr/${qrToken}`;
   const node = dbRef(rtdb, `qrlogin/${qrToken}`);
   await dbSet(node, { status: "pending", created: Date.now() });
@@ -391,6 +396,10 @@ function teardown() {
   for (const unsub of peerUnsubs.values()) unsub();
   peerUnsubs.clear(); userCache.clear();
   clearInterval(heartbeatTimer);
+  // завершаем звонок и снимаем слушатель входящих — иначе при новом входе он смотрит на старый uid
+  if (activeCall) endCall(true);
+  incomingListenerUnsub?.(); incomingListenerUnsub = null;
+  callsListenerStarted = false;
   me = null; chats = new Map(); currentChatId = null; currentTopic = null; messages = [];
 }
 function showMessenger() {
@@ -415,7 +424,11 @@ let pc = null;                 // RTCPeerConnection
 let localStream = null;
 let activeCall = null;         // { calleeUid, callId, isCaller, video }
 let callsListenerStarted = false;
+let incomingListenerUnsub = null; // отписка от входящих (сброс при выходе/смене аккаунта)
 let incomingPending = null;    // { callId, data }
+let callUnsubs = [];           // RTDB-подписки текущего звонка — снимаем в endCall
+let ringTimeout = null;        // авто-отмена исходящего, если не ответили
+let callConnected = false;     // пошёл ли медиапоток
 
 function callPath(calleeUid, callId) { return `calls/${calleeUid}/${callId}`; }
 
@@ -442,25 +455,27 @@ async function startCall(video) {
     from: me.uid, fromName: me.displayName || me.username, fromAvatar: me.avatar || null, fromColor: me.avatarColor ?? 0,
     video, offer: JSON.stringify(offer), status: "ringing", createdAt: Date.now(),
   });
-  // ждём ответ и ICE от собеседника
-  onValue(dbRef(rtdb, `${callPath(v.peerUid, callId)}/answer`), async (snap) => {
+  // ждём ответ и ICE от собеседника (подписки снимаются в endCall — иначе утекают и мешают следующему звонку)
+  callUnsubs.push(onValue(dbRef(rtdb, `${callPath(v.peerUid, callId)}/answer`), async (snap) => {
     const val = snap.val();
     if (val && pc && !pc.currentRemoteDescription) await pc.setRemoteDescription(JSON.parse(val)).catch(() => {});
-  });
-  onChildAdded(dbRef(rtdb, `${callPath(v.peerUid, callId)}/iceTo`), (snap) => {
+  }));
+  callUnsubs.push(onChildAdded(dbRef(rtdb, `${callPath(v.peerUid, callId)}/iceTo`), (snap) => {
     if (pc) pc.addIceCandidate(JSON.parse(snap.val())).catch(() => {});
-  });
-  onValue(dbRef(rtdb, `${callPath(v.peerUid, callId)}/status`), (snap) => {
+  }));
+  callUnsubs.push(onValue(dbRef(rtdb, `${callPath(v.peerUid, callId)}/status`), (snap) => {
     const st = snap.val();
     if (st === "declined") { toast("Звонок отклонён"); endCall(false); }
     if (st === "ended" && activeCall) endCall(false);
-  });
+  }));
+  // если за 45 секунд не ответили — сами завершаем вызов
+  ringTimeout = setTimeout(() => { if (activeCall && !callConnected) { toast("Нет ответа"); endCall(true); } }, 45e3);
 }
 
 function listenIncomingCalls() {
   if (callsListenerStarted) return;
   callsListenerStarted = true;
-  onChildAdded(dbRef(rtdb, `calls/${me.uid}`), (snap) => {
+  incomingListenerUnsub = onChildAdded(dbRef(rtdb, `calls/${me.uid}`), (snap) => {
     const data = snap.val();
     if (!data || data.status !== "ringing" || Date.now() - (data.createdAt || 0) > 60e3) return;
     if (activeCall) { dbUpdate(dbRef(rtdb, callPath(me.uid, snap.key)), { status: "declined" }).catch(() => {}); return; }
@@ -495,12 +510,12 @@ $("#acceptBtn").addEventListener("click", async () => {
   const answer = await pc.createAnswer();
   await pc.setLocalDescription(answer);
   await dbUpdate(dbRef(rtdb, callPath(me.uid, callId)), { answer: JSON.stringify(answer), status: "accepted" });
-  onChildAdded(dbRef(rtdb, `${callPath(me.uid, callId)}/iceFrom`), (snap) => {
+  callUnsubs.push(onChildAdded(dbRef(rtdb, `${callPath(me.uid, callId)}/iceFrom`), (snap) => {
     if (pc) pc.addIceCandidate(JSON.parse(snap.val())).catch(() => {});
-  });
-  onValue(dbRef(rtdb, `${callPath(me.uid, callId)}/status`), (snap) => {
+  }));
+  callUnsubs.push(onValue(dbRef(rtdb, `${callPath(me.uid, callId)}/status`), (snap) => {
     if (snap.val() === "ended" && activeCall) endCall(false);
-  });
+  }));
 });
 
 $("#declineBtn").addEventListener("click", () => {
@@ -513,6 +528,8 @@ $("#declineBtn").addEventListener("click", () => {
 let callTimerInt = null;
 let callStartTs = 0;
 function startCallTimer() {
+  callConnected = true;
+  clearTimeout(ringTimeout); ringTimeout = null;
   if (callTimerInt) return;
   callStartTs = Date.now();
   callTimerInt = setInterval(() => {
@@ -539,6 +556,10 @@ function endCall(signal = true) {
     const p = callPath(activeCall.calleeUid, activeCall.callId);
     setTimeout(() => dbRemove(dbRef(rtdb, p)).catch(() => {}), 3000);
   }
+  callUnsubs.forEach(u => { try { u(); } catch {} });
+  callUnsubs = [];
+  clearTimeout(ringTimeout); ringTimeout = null;
+  callConnected = false;
   try { pc?.close(); } catch {}
   pc = null;
   localStream?.getTracks().forEach(t => t.stop());
@@ -862,6 +883,7 @@ async function openChat(chatId) {
   currentChatId = chatId;
   currentTopic = null;
   replyTarget = null; editTarget = null;
+  resetMsgSearch();
   messageInput.value = localStorage.getItem(`draft_${chatId}`) || "";
   autoGrow(messageInput);
   $("#replyBar").classList.add("hidden");
@@ -947,10 +969,15 @@ function subscribeMessages(chatId) {
     messages = snap.docs.map(d => ({ id: d.id, ...d.data() })).reverse();
     const chat = currentChat();
     if (!chat) return;
-    const myMention = lastMentionAck ? messages.find(m => (m.mentions || []).includes(me.uid) && m.sender !== me.uid && (m.createdAt || 0) > lastMentionAck) : null;
-    if (myMention) {
-      lastMentionAck = myMention.createdAt || Date.now();
-      notifyMention(myMention);
+    if (first) {
+      // при открытии чата задаём базовую отметку по последнему сообщению — не шумим на историю
+      lastMentionAck = messages.reduce((mx, m) => Math.max(mx, m.createdAt || 0), 0);
+    } else {
+      const myMention = messages.find(m => (m.mentions || []).includes(me.uid) && m.sender !== me.uid && (m.createdAt || 0) > lastMentionAck);
+      if (myMention) {
+        lastMentionAck = myMention.createdAt || Date.now();
+        notifyMention(myMention);
+      }
     }
     if (isForum(chat) && !currentTopic) renderTopicList();
     else renderMessagesView(!first);
@@ -961,10 +988,12 @@ function subscribeMessages(chatId) {
     }
   }, (error) => toast(ruError(error)));
 }
+let msgSearchQuery = "";
 function visibleMessages() {
   const chat = currentChat();
   let list = messages.filter(m => !m.deleted);
   if (chat && isForum(chat) && currentTopic) list = list.filter(m => (m.topicId || "general") === currentTopic.id);
+  if (msgSearchQuery) list = list.filter(m => (m.text || "").toLowerCase().includes(msgSearchQuery));
   return list;
 }
 function renderMessagesView(animateLast = false) {
@@ -989,8 +1018,33 @@ function renderMessagesView(animateLast = false) {
   if (atBottom || animateLast) box.scrollTop = box.scrollHeight;
   renderPinnedBar();
 }
+// ---------- поиск по сообщениям открытого чата ----------
+function resetMsgSearch() {
+  msgSearchQuery = "";
+  const bar = $("#msgSearchBar"), inp = $("#msgSearchInput"), cnt = $("#msgSearchCount");
+  if (bar) bar.classList.add("hidden");
+  if (inp) inp.value = "";
+  if (cnt) cnt.textContent = "";
+}
+function updateMsgSearch(raw) {
+  msgSearchQuery = (raw || "").trim().toLowerCase();
+  renderMessagesView(false);
+  const cnt = $("#msgSearchCount");
+  if (cnt) cnt.textContent = msgSearchQuery ? `${visibleMessages().length}` : "";
+}
+$("#msgSearchButton").addEventListener("click", () => {
+  const bar = $("#msgSearchBar");
+  const willShow = bar.classList.contains("hidden");
+  bar.classList.toggle("hidden");
+  if (willShow) { $("#msgSearchInput").focus(); }
+  else { resetMsgSearch(); renderMessagesView(false); }
+});
+$("#msgSearchInput").addEventListener("input", (e) => updateMsgSearch(e.target.value));
+$("#msgSearchClose").addEventListener("click", () => { resetMsgSearch(); renderMessagesView(false); });
+
 function closeConversation() {
   currentChatId = null; currentTopic = null;
+  resetMsgSearch();
   messagesUnsub?.(); messagesUnsub = null;
   messages = [];
   applyComposerState();
@@ -1263,7 +1317,7 @@ function buildMessageNode(message) {
     ${message.replyTo ? `<div class="reply-quote" data-target="${escapeHtml(message.replyTo.id)}"><b>${escapeHtml(message.replyTo.sender)}</b>${escapeHtml(message.replyTo.text)}</div>` : ""}
     ${message.image ? `<img class="photo" src="${escapeHtml(message.image)}" alt="Фото" loading="lazy" />` : ""}
     ${message.sticker ? `<img class="sticker-msg" src="/stickers/${escapeHtml(message.sticker)}.png" alt="Стикер" loading="lazy" />` : ""}
-    ${message.preview ? `<div class="link-preview"><a href="${escapeHtml(message.preview.url)}" target="_blank" rel="noopener noreferrer">${message.preview.image ? `<img src="${escapeHtml(message.preview.image)}" alt="" loading="lazy" onerror="this.style.display='none'" />` : ""}<span class="lp-body"><strong>${escapeHtml(message.preview.title || message.preview.url)}</strong>${message.preview.desc ? `<em>${escapeHtml(message.preview.desc)}</em>` : ""}</span></a></div>` : ""}
+    ${message.preview ? `<div class="link-preview"><a href="${escapeHtml(message.preview.url)}" target="_blank" rel="noopener noreferrer">${message.preview.image ? `<img src="${escapeHtml(message.preview.image)}" alt="" loading="lazy" class="lp-img" />` : ""}<span class="lp-body"><strong>${escapeHtml(message.preview.title || message.preview.url)}</strong>${message.preview.desc ? `<em>${escapeHtml(message.preview.desc)}</em>` : ""}</span></a></div>` : ""}
     ${message.voice ? `<span class="voice-wrap"><audio class="voice-msg" controls preload="metadata" src="${escapeHtml(message.voice.data)}"></audio><small class="voice-len">${message.voice.duration || 0} сек</small></span>` : ""}
     ${message.poll ? renderPollHtml(message) : ""}
     <span class="msg-text">${formatMessageText(message.text || "")}</span>
@@ -1804,7 +1858,7 @@ function showChatContextMenu(point, v) {
 // ---------- forward ----------
 function openForwardPicker(message) {
   const views = [...chats.values()].map(viewOf);
-  const rows = views.map(c => `<label class="user-row" data-chat="${escapeHtml(c.id)}"><input type="checkbox" class="fwd-chk" value="${escapeHtml(c.id)}" /><span class="avatar" data-color="${c.avatarColor}">${c.type === "saved" ? "☆" : escapeHtml((c.title || "?")[0].toUpperCase())}</span><span class="info"><strong>${escapeHtml(c.title)}</strong></span></label>`).join("");
+  const rows = views.map(c => `<label class="user-row" data-chat="${escapeHtml(c.id)}"><input type="checkbox" class="fwd-chk" value="${escapeHtml(c.id)}" /><span class="avatar" data-color="${escapeHtml(c.avatarColor)}">${c.type === "saved" ? "☆" : escapeHtml((c.title || "?")[0].toUpperCase())}</span><span class="info"><strong>${escapeHtml(c.title)}</strong></span></label>`).join("");
   openModal(`<h3>Переслать в…</h3><div class="user-results">${rows}</div><div class="modal-actions"><button class="cancel">Отмена</button><button class="primary fwd-go" disabled>Переслать</button></div>`);
   const go = $("#modal .fwd-go");
   const update = () => {
@@ -2247,7 +2301,7 @@ async function joinInvite(code) {
     const info = inv.data();
     const alreadyMember = chats.has(info.chatId);
     openModal(`<h3>Приглашение в группу</h3>
-      <div class="settings-profile"><div class="avatar large" data-color="${info.avatarColor}">${escapeHtml((info.title || "?")[0].toUpperCase())}</div>
+      <div class="settings-profile"><div class="avatar large" data-color="${escapeHtml(info.avatarColor)}">${escapeHtml((info.title || "?")[0].toUpperCase())}</div>
       <h3>${escapeHtml(info.title)}</h3><p class="muted">${info.memberCount} участник(ов)</p></div>
       <div class="modal-actions"><button class="cancel">Отмена</button><button class="confirm">${alreadyMember ? "Открыть" : "Вступить"}</button></div>`);
     $("#modal .cancel").addEventListener("click", closeModal);
@@ -2285,7 +2339,7 @@ $("#chatSearch").addEventListener("input", () => {
       for (const c of matched) {
         const item = document.createElement("button");
         item.className = "chat-item";
-        item.innerHTML = `<span class="avatar" data-color="${c.avatarColor}">${c.type === "saved" ? "☆" : escapeHtml(c.title[0].toUpperCase())}</span><span class="chat-item-text"><strong>${escapeHtml(c.title)}</strong></span>`;
+        item.innerHTML = `<span class="avatar" data-color="${escapeHtml(c.avatarColor)}">${c.type === "saved" ? "☆" : escapeHtml(c.title[0].toUpperCase())}</span><span class="chat-item-text"><strong>${escapeHtml(c.title)}</strong></span>`;
         item.addEventListener("click", () => { $("#chatSearch").value = ""; results.classList.add("hidden"); list.classList.remove("hidden"); openChat(c.id); });
         results.appendChild(item);
       }

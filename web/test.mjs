@@ -150,6 +150,39 @@ check("chat list query", myChats.docs.length >= 3, `${myChats.docs.length} ча�
 const found = await getDocs(query(collection(owner.db, "users"), where("username", ">=", "fgue"), where("username", "<=", "fgue"), limit(20)));
 check("prefix user search", found.docs.length === 2, found.docs.map(d => d.data().username).join(","));
 
+// --- Модерация: мут и бан теперь реально работают на стороне правил ---
+const future = Date.now() + 3600e3;
+await updateDoc(doc(owner.db, "chats", gid), { [`mutes.${uidMember}`]: future });
+await expectDenied("muted member cannot send", () =>
+  setDoc(doc(collection(member.db, "chats", gid, "messages")), { sender: uidMember, senderName: "fmember", text: "во время мута", createdAt: Date.now(), reactions: {}, topicId: "general" }));
+await updateDoc(doc(owner.db, "chats", gid), { [`mutes.${uidMember}`]: 1000 }); // мут в прошлом = снят
+await setDoc(doc(collection(member.db, "chats", gid, "messages")), { sender: uidMember, senderName: "fmember", text: "после мута", createdAt: Date.now(), reactions: {}, topicId: "general" });
+check("member can send after mute expired", true);
+await updateDoc(doc(owner.db, "chats", gid), { [`bans.${uidMember}`]: future });
+await expectDenied("banned member cannot send", () =>
+  setDoc(doc(collection(member.db, "chats", gid, "messages")), { sender: uidMember, senderName: "fmember", text: "во время бана", createdAt: Date.now(), reactions: {}, topicId: "general" }));
+await updateDoc(doc(owner.db, "chats", gid), { [`bans.${uidMember}`]: deleteField() });
+
+// --- Нельзя вписать себя в приватный чат (ЛС двух других) ---
+await expectDenied("outsider cannot self-add to private DM", () =>
+  updateDoc(doc(member.db, "chats", dmId), { members: arrayUnion(uidMember) }));
+
+// --- Голосование в опросе: можно менять только голоса, не вопрос/варианты ---
+const pollRef = doc(collection(owner.db, "chats", gid, "messages"));
+await setDoc(pollRef, { sender: uidOwner, senderName: "fowner", text: "", createdAt: Date.now(), reactions: {}, topicId: "general",
+  poll: { question: "Куда?", options: [{ id: "a", text: "Лес" }, { id: "b", text: "Море" }], votes: {} } });
+await updateDoc(doc(member.db, "chats", gid, "messages", pollRef.id), { [`poll.votes.${uidMember}`]: "a" });
+check("member votes in poll", true);
+await expectDenied("member cannot tamper poll question", () =>
+  updateDoc(doc(member.db, "chats", gid, "messages", pollRef.id), { "poll.question": "ВЗЛОМ" }));
+
+// --- Просмотры историй: отмечать можно только свой uid ---
+await setDoc(doc(owner.db, "stories", "story_test1"), { uid: uidOwner, image: "x", createdAt: Date.now(), expiresAt: Date.now() + 86400e3, views: {} });
+await updateDoc(doc(member.db, "stories", "story_test1"), { [`views.${uidMember}`]: Date.now() });
+check("member marks own story view", true);
+await expectDenied("cannot forge another user's story view", () =>
+  updateDoc(doc(guest2.db, "stories", "story_test1"), { [`views.${uidOwner}`]: Date.now() }));
+
 console.log(results.join("\n"));
 console.log(results.some(r => r.startsWith("FAIL")) ? "\n=== ЕСТЬ ОШИБКИ ===" : "\n=== ВСЕ ТЕСТЫ ПРОШЛИ ===");
 process.exit(0);

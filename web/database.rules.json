@@ -1,16 +1,28 @@
 {
   "rules": {
     "qrlogin": {
-      ".read": "true",
-      ".write": "true"
+      "$token": {
+        ".read": true,
+        ".write": "!data.exists() || auth != null",
+        ".validate": "newData.hasChildren(['status'])"
+      }
     },
     "bump": {
       ".read": "auth != null",
       ".write": "auth != null"
     },
+    "calls": {
+      "$uid": {
+        ".read": "auth != null && auth.uid === $uid",
+        "$callId": {
+          ".read": "auth != null && (auth.uid === $uid || auth.uid === data.child('from').val())",
+          ".write": "auth != null && ((!data.exists() && newData.child('from').val() === auth.uid) || auth.uid === $uid || auth.uid === data.child('from').val())"
+        }
+      }
+    },
     "$other": {
-      ".read": "auth != null",
-      ".write": "auth != null"
+      ".read": false,
+      ".write": false
     }
   }
 }
