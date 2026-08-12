@@ -2140,7 +2140,7 @@ void QrBtn_Click(object sender, RoutedEventArgs e)
         {
             MsgInput.Text = text;
             var isPrivate = Fire.FStr(f, "type") == "private";
-            MessageBox.Show(isPrivate && ex.Message.Contains("PERMISSION") ? "Не отправлено: пользователь вас заблокировал" : ex.Ru, "SandyGram");
+            MessageBox.Show(isPrivate && ex.Message.Contains("PERMISSION") ? "🚫 Этот пользователь ограничил круг тех, кто может ему писать" : ex.Ru, "SandyGram");
         }
         catch (Exception ex) { MsgInput.Text = text; MessageBox.Show(ex.Message, "SandyGram"); }
         finally { sending = false; MsgInput.Focus(); }

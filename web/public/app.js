@@ -979,13 +979,20 @@ function applyComposerState() {
       if (currentTopic.closed && !isChatAdmin(chat)) { showComposer = false; showClosed = true; }
     }
   }
+  // ЛС недоступна: узнаём об этом только по отказу отправки (чужие настройки читать нельзя)
+  const dmBlockedNow = chat && chat.type === "private" && dmBlocked.has(chat.id);
+  if (dmBlockedNow) showComposer = false;
   $("#messageForm").classList.toggle("hidden", !showComposer);
-  $("#closedBar").classList.toggle("hidden", !showClosed);
+  $("#closedBar").classList.toggle("hidden", !showClosed || dmBlockedNow);
   $("#closedBar").textContent = closedText;
+  $("#dmBlockedBar").classList.toggle("hidden", !dmBlockedNow);
 }
+// чаты, куда сервер отказал в отправке (закрытая личка / блокировка получателя)
+const dmBlocked = new Set();
 async function openChat(chatId) {
   const chat = chats.get(chatId);
   if (!chat) return;
+  dmBlocked.delete(chatId); // при повторном открытии даём шанс попробовать снова
   // сохранить черновик предыдущего чата
   if (currentChatId && currentChatId !== chatId) {
     const prev = messageInput.value.trim();
@@ -1978,8 +1985,11 @@ $("#messageForm").addEventListener("submit", async (event) => {
     cancelReplyEdit();
   } catch (error) {
     messageInput.value = text; autoGrow(messageInput); // вернуть текст при ошибке
-    if ((error?.code || "").includes("permission-denied") && currentChat()?.type === "private") toast("Не отправлено: пользователь вас заблокировал");
-    else toast(ruError(error));
+    if ((error?.code || "").includes("permission-denied") && currentChat()?.type === "private") {
+      dmBlocked.add(currentChatId);
+      applyComposerState();
+      toast("Этот пользователь ограничил, кто может ему писать");
+    } else toast(ruError(error));
   } finally { sendBusy = false; }
 });
 

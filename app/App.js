@@ -1863,6 +1863,7 @@ function ChatScreen({ ctx, chatId }) {
   const [reactPick, setReactPick] = useState(null);     // сообщение для полного эмодзи-пикера
   const [nextSilent, setNextSilent] = useState(false);  // следующее сообщение — без пуша
   const [fpScan, setFpScan] = useState(null);           // сверка отпечатка ключа по QR
+  const [dmDenied, setDmDenied] = useState(false);      // получатель ограничил, кто может ему писать
 
   // Секретный чат: Android не даёт снять скриншот и не показывает чат в списке задач
   useEffect(() => {
@@ -1978,7 +1979,7 @@ function ChatScreen({ ctx, chatId }) {
   const typing = Object.entries(chat.typing || {}).filter(([uid, t]) => uid !== me.uid && Date.now() - t < 3000);
   const topicsList = isForum ? [{ id: "general", title: "Общий", icon: "#", closed: !!chat.generalClosed, createdAt: chat.createdAt }, ...chat.topics] : [];
   const currentClosed = topic ? (topic.id === "general" ? !!chat.generalClosed : !!(chat.topics || []).find(t => t.id === topic.id)?.closed) : false;
-  const canWrite = (chat.type !== "channel" || isAdmin) && (!isForum || (topic && (!currentClosed || isAdmin)));
+  const canWrite = (chat.type !== "channel" || isAdmin) && (!isForum || (topic && (!currentClosed || isAdmin))) && !dmDenied;
   const pinnedMsg = chat.pinnedMessageId ? messages.find(m => m.id === chat.pinnedMessageId && !m.deleted) : null;
 
   // Просроченные исчезающие и просмотренные одноразовые прячем сразу — сервер добьёт позже
@@ -2104,7 +2105,7 @@ function ChatScreen({ ctx, chatId }) {
       setReplyTo(null);
     } catch (e) {
       setText(body); // вернуть текст при ошибке
-      if ((e?.code || "").includes("permission-denied") && chat.type === "private") Alert.alert("", "Не отправлено: пользователь вас заблокировал");
+      if ((e?.code || "").includes("permission-denied") && chat.type === "private") setDmDenied(true);
       else Alert.alert("Ошибка", ruError(e));
     } finally { sendingRef.current = false; }
   };
@@ -2639,7 +2640,11 @@ function ChatScreen({ ctx, chatId }) {
             </View>
           ) : (
             <View style={{ padding: 14, alignItems: "center", backgroundColor: T.surface }}>
-              <Text style={{ color: T.muted }}>{chat.type === "channel" ? "📢 Писать в канал могут только админы" : "🔒 Топик закрыт — писать могут только админы"}</Text>
+              <Text style={{ color: T.muted, textAlign: "center" }}>{
+                dmDenied ? "🚫 Этот пользователь ограничил круг тех, кто может ему писать"
+                  : chat.type === "channel" ? "📢 Писать в канал могут только админы"
+                  : "🔒 Топик закрыт — писать могут только админы"
+              }</Text>
             </View>
           )}
         </KeyboardAvoidingView>
