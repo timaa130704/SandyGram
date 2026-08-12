@@ -1402,10 +1402,7 @@ void QrBtn_Click(object sender, RoutedEventArgs e)
             stack.Children.Add(pStack);
         }
 
-        // 3.0: секретный чат — расшифровать на Windows нельзя, ключей тут нет
-        if (Fire.FMap(m, "enc").Count > 0)
-            stack.Children.Add(MakeMessageText("🔒 Секретное сообщение — читается в приложении и в браузере", fg, mine));
-        else if (Fire.FStr(m, "text") is { Length: > 0 } text)
+        if (Fire.FStr(m, "text") is { Length: > 0 } text)
             stack.Children.Add(MakeMessageText(text, fg, mine));
 
         var created = Fire.FLong(m, "createdAt");

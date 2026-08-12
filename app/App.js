@@ -25,14 +25,11 @@ import {
   TTL_OPTIONS, ttlLabel, ttlLeft, isExpired,
   foldersWithCounts, chatsInFolder, newTttGame, tttMove, tttMark,
 } from "./sg30";
-import { ensureKeyPair, sealForMembers, openForMe, fingerprint, exportKeyBackup, importKeyBackup, restoreKeyPair } from "./sge2e";
 import { ref as dbRef, onValue, onChildAdded, set as dbSet, update as dbUpdate, push as dbPush, remove as dbRemove } from "firebase/database";
 import { CameraView, useCameraPermissions } from "expo-camera";
 import * as SecureStore from "expo-secure-store";
 import * as LocalAuthentication from "expo-local-authentication";
 import * as Crypto from "expo-crypto";
-import * as Sharing from "expo-sharing";
-import * as ScreenCapture from "expo-screen-capture";
 import { RTCPeerConnection, RTCView, mediaDevices } from "react-native-webrtc";
 import {
   createUserWithEmailAndPassword, signInWithEmailAndPassword, signOut, onAuthStateChanged,
@@ -61,13 +58,6 @@ const THEMES = {
 };
 const AVATAR_TONES = ["#f3edff", "#e8ddfd", "#dccffb", "#cfc0f8", "#c2b1f4", "#b5a2f0", "#a893ec"];
 const ONLINE_WINDOW = 70e3;
-// Ключи сквозного шифрования: приватный лежит в expo-secure-store (Keystore Android),
-// публичный публикуется в users/{uid}.e2ePub. Модульная переменная — чтобы был доступ из всех экранов.
-let myKeys = null;
-const e2eStorage = {
-  get: (k) => SecureStore.getItemAsync(k).catch(() => null),
-  set: (k, v) => (v ? SecureStore.setItemAsync(k, v) : SecureStore.deleteItemAsync(k)).catch(() => { }),
-};
 const QUICK_REACTIONS = ["❤️", "👍", "🔥", "😂", "😮", "😢"];
 // Полный набор для пикера реакций (правила разрешают до 24 разных эмодзи на сообщение)
 const ALL_REACTIONS = [
@@ -544,19 +534,6 @@ function SandyGram() {
   }, [me?.uid]);
 
   // ---- ключи сквозного шифрования ----
-  useEffect(() => {
-    if (!me?.uid) return;
-    (async () => {
-      try {
-        myKeys = await ensureKeyPair(e2eStorage);
-        if (me.e2ePub !== myKeys.pub) {
-          await updateDoc(doc(db, "users", me.uid), { e2ePub: myKeys.pub });
-          setMe(prev => (prev ? { ...prev, e2ePub: myKeys.pub } : prev));
-        }
-      } catch { myKeys = null; }
-    })();
-  }, [me?.uid]);
-
   // ---- приватные настройки (чёрный список) ----
   useEffect(() => {
     if (!me?.uid) return;
@@ -1195,46 +1172,6 @@ function StoryViewer({ ctx, uid, onClose, onAdd }) {
   );
 }
 
-// ================================== QR-СКАНЕР (вход на ПК)
-// Сверка ключей: на компьютере открыт QR с отпечатком, телефон его сканирует.
-// Рисовать QR на телефоне нечем (нет библиотеки), поэтому проверка односторонняя —
-// совпадение отпечатков всё равно доказывает отсутствие подмены.
-function FingerprintScanModal({ T, expectedPub, onClose }) {
-  const [perm, requestPerm] = useCameraPermissions();
-  const [status, setStatus] = useState(null);
-  const onScanned = ({ data }) => {
-    if (status || !data || !data.startsWith("sgfp:")) return;
-    const pub = data.slice(5);
-    setStatus(pub === expectedPub
-      ? { ok: true, text: "✔ Ключи совпадают — подмены нет" }
-      : { ok: false, text: "✖ Ключи РАЗНЫЕ. Не пишите ничего секретного." });
-  };
-  return (
-    <Modal transparent animationType="fade" onRequestClose={onClose}>
-      <View style={{ flex: 1, backgroundColor: "#000" }}>
-        {perm?.granted ? (
-          <CameraView style={StyleSheet.absoluteFill} facing="back" barcodeScannerSettings={{ barcodeTypes: ["qr"] }} onBarcodeScanned={onScanned} />
-        ) : (
-          <View style={{ flex: 1, alignItems: "center", justifyContent: "center", padding: 24 }}>
-            <Text style={{ color: "#fff", textAlign: "center", marginBottom: 14 }}>Нужен доступ к камере, чтобы считать QR с отпечатком</Text>
-            <TouchableOpacity onPress={requestPerm} style={{ padding: 13, paddingHorizontal: 22, borderRadius: 999, backgroundColor: T.inverse }}>
-              <Text style={{ color: T.onInverse, fontWeight: "800" }}>Разрешить</Text>
-            </TouchableOpacity>
-          </View>
-        )}
-        <View style={{ position: "absolute", left: 0, right: 0, bottom: 0, padding: 22, paddingBottom: 40, backgroundColor: "#000c" }}>
-          <Text style={{ color: status ? (status.ok ? "#4caf50" : "#ff6b6b") : "#fff", fontSize: 15, fontWeight: "700", textAlign: "center" }}>
-            {status ? status.text : "Откройте у собеседника «Отпечаток ключа» и наведите камеру"}
-          </Text>
-          <TouchableOpacity onPress={onClose} style={{ marginTop: 14, padding: 13, borderRadius: 999, backgroundColor: "#fff2", alignItems: "center" }}>
-            <Text style={{ color: "#fff", fontWeight: "700" }}>Закрыть</Text>
-          </TouchableOpacity>
-        </View>
-      </View>
-    </Modal>
-  );
-}
-
 function QrScannerModal({ visible, onClose }) {
   const [perm, requestPerm] = useCameraPermissions();
   const [captured, setCaptured] = useState(null);
@@ -1324,8 +1261,6 @@ function SecuritySheet({ ctx, onClose }) {
   const { T, me, myPrefs, setMyPrefs, chats } = ctx;
   const [view, setView] = useState("main");
   const [rows, setRows] = useState([]);
-  const [pass, setPass] = useState("");
-  const [busy, setBusy] = useState(false);
   const savePrefs = async (patch) => {
     await setDoc(doc(db, "users", me.uid, "private", "prefs"), patch, { merge: true });
     setMyPrefs(p => ({ ...p, ...patch }));
@@ -1365,53 +1300,20 @@ function SecuritySheet({ ctx, onClose }) {
     const snap = await getDocs(query(collection(db, "users", me.uid, "seclog"), orderBy("at", "desc"), limit(50))).catch(() => null);
     setRows(snap ? snap.docs.map(d => d.data()) : []);
   };
-  const doBackup = async () => {
-    if (!myKeys) return Alert.alert("", "На этом устройстве нет ключа шифрования");
-    setBusy(true);
-    try {
-      // KDF намеренно долгий — на телефоне это несколько секунд
-      const blob = exportKeyBackup(myKeys, pass);
-      const path = `${FileSystem.cacheDirectory}sandygram-${me.username}.sgkey`;
-      await FileSystem.writeAsStringAsync(path, blob);
-      secLog(me.uid, "key_backup");
-      await Sharing.shareAsync(path, { mimeType: "application/json", dialogTitle: "Сохранить копию ключа" }).catch(() => { });
-      Alert.alert("", "Копия сохранена. Храните файл и фразу отдельно.");
-      setPass("");
-    } catch (e) { Alert.alert("Ошибка", e?.message || ruError(e)); }
-    finally { setBusy(false); }
-  };
-  const doRestore = async () => {
-    setBusy(true);
-    try {
-      const res = await DocumentPicker.getDocumentAsync({ copyToCacheDirectory: true, type: "*/*" });
-      const a = res.assets?.[0];
-      if (res.canceled || !a) return;
-      const pair = importKeyBackup(await FileSystem.readAsStringAsync(a.uri), pass);
-      await restoreKeyPair(e2eStorage, pair);
-      myKeys = pair;
-      await updateDoc(doc(db, "users", me.uid), { e2ePub: pair.pub });
-      secLog(me.uid, "key_restore");
-      Alert.alert("", "Ключ восстановлен — старые секретные чаты снова читаются");
-      setPass("");
-    } catch (e) { Alert.alert("Ошибка", e?.message || ruError(e)); }
-    finally { setBusy(false); }
-  };
   return (
     <Modal transparent animationType="slide" onRequestClose={onClose}>
       <TouchableOpacity activeOpacity={1} onPress={onClose} style={{ flex: 1, backgroundColor: "#0008" }} />
       <View style={{ backgroundColor: T.surface, borderTopLeftRadius: 28, borderTopRightRadius: 28, padding: 20, paddingBottom: 34, maxHeight: "82%" }}>
         <Text style={{ color: T.text, fontSize: 18, fontWeight: "800", marginBottom: 10 }}>
-          {view === "main" ? "Безопасность и приватность" : view === "sessions" ? "Активные сессии" : view === "log" ? "Журнал безопасности" : "Резервная копия ключа"}
+          {view === "main" ? "Безопасность и приватность" : view === "sessions" ? "Активные сессии" : "Журнал безопасности"}
         </Text>
         {view === "main" && (
           <ScrollView>
             <TouchableOpacity style={st.row} onPress={() => setView("dm")}><Text style={{ color: T.text, fontSize: 16 }}>✉️  Кто может писать в личку: {DM_MODE_RU[dmModeOf(myPrefs)]}</Text></TouchableOpacity>
-            <TouchableOpacity style={st.row} onPress={() => setView("backup")}><Text style={{ color: T.text, fontSize: 16 }}>🗝  Резервная копия ключа шифрования</Text></TouchableOpacity>
             <TouchableOpacity style={st.row} onPress={openSessions}><Text style={{ color: T.text, fontSize: 16 }}>💻  Активные сессии</Text></TouchableOpacity>
             <TouchableOpacity style={st.row} onPress={openLog}><Text style={{ color: T.text, fontSize: 16 }}>📜  Журнал безопасности</Text></TouchableOpacity>
             <Text style={{ color: T.muted, fontSize: 12.5, marginTop: 10 }}>
               Кто может писать в личку — проверяется правилами базы, а не только приложением.
-              Экран секретных чатов защищён от скриншотов.
             </Text>
           </ScrollView>
         )}
@@ -1470,22 +1372,6 @@ function SecuritySheet({ ctx, onClose }) {
               </View>
             ))}
             <Text style={{ color: T.muted, fontSize: 12.5, marginTop: 8 }}>Записи только добавляются: правила базы не дают изменить их задним числом.</Text>
-            <TouchableOpacity onPress={() => setView("main")} style={{ marginTop: 8, padding: 12, alignItems: "center" }}><Text style={{ color: T.muted }}>Назад</Text></TouchableOpacity>
-          </ScrollView>
-        )}
-        {view === "backup" && (
-          <ScrollView>
-            <Text style={{ color: T.muted, fontSize: 13, marginBottom: 10 }}>
-              Ключ секретных чатов лежит только на этом телефоне. Копия шифруется парольной фразой: без неё её не прочитает никто, включая нас. Забудете фразу — копия бесполезна.
-            </Text>
-            <TextInput value={pass} onChangeText={setPass} secureTextEntry placeholder="Парольная фраза (от 8 символов)" placeholderTextColor={T.muted}
-              style={[st.input, { backgroundColor: T.surface2, color: T.text }]} />
-            <TouchableOpacity disabled={busy} onPress={doBackup} style={{ marginTop: 10, padding: 13, borderRadius: 999, backgroundColor: T.inverse, alignItems: "center", opacity: busy ? 0.6 : 1 }}>
-              <Text style={{ color: T.onInverse, fontWeight: "800" }}>{busy ? "Считаем ключ…" : "Сохранить копию"}</Text>
-            </TouchableOpacity>
-            <TouchableOpacity disabled={busy} onPress={doRestore} style={{ marginTop: 8, padding: 13, borderRadius: 999, backgroundColor: T.surface2, alignItems: "center", opacity: busy ? 0.6 : 1 }}>
-              <Text style={{ color: T.text, fontWeight: "700" }}>Восстановить из файла</Text>
-            </TouchableOpacity>
             <TouchableOpacity onPress={() => setView("main")} style={{ marginTop: 8, padding: 12, alignItems: "center" }}><Text style={{ color: T.muted }}>Назад</Text></TouchableOpacity>
           </ScrollView>
         )}
@@ -1853,8 +1739,6 @@ function ChatScreen({ ctx, chatId }) {
   const [topic, setTopic] = useState(null);
   const [replyTo, setReplyTo] = useState(null);
   const [uploadPct, setUploadPct] = useState(null); // прогресс загрузки вложения в R2
-  const [peerKeys, setPeerKeys] = useState({}); // uid -> публичный ключ, для расшифровки
-  const [e2eOpen, setE2eOpen] = useState(false);
   const [ttlOpen, setTtlOpen] = useState(false); // выбор таймера исчезающих
   const [schedOpen, setSchedOpen] = useState(false); // отложенная отправка
   const [editTarget, setEditTarget] = useState(null);
@@ -1863,15 +1747,8 @@ function ChatScreen({ ctx, chatId }) {
   const [forwardNote, setForwardNote] = useState("");   // комментарий к пересылке
   const [reactPick, setReactPick] = useState(null);     // сообщение для полного эмодзи-пикера
   const [nextSilent, setNextSilent] = useState(false);  // следующее сообщение — без пуша
-  const [fpScan, setFpScan] = useState(null);           // сверка отпечатка ключа по QR
   const [dmDenied, setDmDenied] = useState(false);      // получатель ограничил, кто может ему писать
 
-  // Секретный чат: Android не даёт снять скриншот и не показывает чат в списке задач
-  useEffect(() => {
-    if (!chat?.e2e) return;
-    ScreenCapture.preventScreenCaptureAsync().catch(() => { });
-    return () => { ScreenCapture.allowScreenCaptureAsync().catch(() => { }); };
-  }, [chat?.e2e]);
   const [sel, setSel] = useState({ start: 0, end: 0 }); // выделение в поле ввода → панель форматирования
   const [selForce, setSelForce] = useState(null);       // разовая установка курсора после форматирования
   const [forwardSel, setForwardSel] = useState(new Set());
@@ -2005,16 +1882,6 @@ function ChatScreen({ ctx, chatId }) {
     // Исчезающие сообщения: таймер чата задаёт срок жизни, добивает push-worker
     if (targetChat.ttl > 0) msg.expiresAt = msg.createdAt + targetChat.ttl;
     if (forwardedFrom) msg.forwardedFrom = forwardedFrom;
-    // Секретный чат: в базу уходят только конверты enc[uid], plaintext остаётся на устройстве
-    if (targetChat.e2e && msg.text) {
-      if (!myKeys) throw new Error("Нет ключа шифрования на этом устройстве");
-      const pubs = {};
-      for (const uid of targetChat.members) {
-        pubs[uid] = uid === me.uid ? myKeys.pub : (await fetchUser(uid))?.e2ePub || null;
-      }
-      msg.enc = sealForMembers(targetChat.members, pubs, myKeys.secret, msg.text);
-      msg.text = "";
-    }
     if (!forwardedFrom && targetChat.id === chatId && replyTo) msg.replyTo = { id: replyTo.id, sender: replyTo.senderName, text: replyTo.text ? replyTo.text.slice(0, 120) : "📷 Фото" };
     if (textBody) {
       const map = await memberUsernameMapRef.current;
@@ -2035,7 +1902,7 @@ function ChatScreen({ ctx, chatId }) {
     const mediaPreview = media
       ? (media.kind === "video" ? "🎬 Видео" : media.kind === "audio" ? "🎵 Аудио" : media.kind === "image" ? "🖼 Изображение" : `📎 ${media.name || "Файл"}`)
       : "";
-    const previewText = (targetChat.e2e ? "🔒 Секретное сообщение" : msg.text)
+    const previewText = msg.text
       || (sticker ? "🧩 Стикер" : voice ? "🎤 Голосовое сообщение" : poll ? "📊 Опрос"
           : game ? "🎮 Крестики-нолики" : dice ? `🎲 ${dice.value}` : mediaPreview);
     const patch = {
@@ -2235,14 +2102,6 @@ function ChatScreen({ ctx, chatId }) {
     await updateDoc(ref, patch).catch(() => { });
   };
   // Мини-игра: ход проверяется общей логикой sg30, правила Firestore дублируют проверку
-  // Расшифровка секретного сообщения: приватный ключ есть только на этом устройстве
-  const decryptMessage = (m) => {
-    if (!myKeys) return "🔒 Зашифровано (нет ключа на этом устройстве)";
-    const senderPub = m.sender === me.uid ? myKeys.pub : (peerKeys[m.sender] || null);
-    if (!senderPub) return "🔒 Зашифровано";
-    const text = openForMe(m, me.uid, senderPub, myKeys.secret);
-    return text === null ? "🔒 Не удалось расшифровать (ключ другого устройства)" : text;
-  };
   // Одноразовое: открываем на весь экран и сразу помечаем просмотр — больше его не увидит никто
   const revealViewOnce = async (m) => {
     const url = m.media?.url || m.image;
@@ -2251,22 +2110,6 @@ function ChatScreen({ ctx, chatId }) {
     try { await updateDoc(doc(db, "chats", chatId, "messages", m.id), { [`viewedBy.${me.uid}`]: Date.now() }); }
     catch (e) { Alert.alert("Ошибка", ruError(e)); }
   };
-  // Публичные ключи участников нужны и для шифрования, и для расшифровки входящих
-  useEffect(() => {
-    if (!chat?.members) return;
-    let alive = true;
-    (async () => {
-      const out = {};
-      for (const uid of chat.members) {
-        if (uid === me.uid) continue;
-        const u = await fetchUser(uid).catch(() => null);
-        if (u?.e2ePub) out[uid] = u.e2ePub;
-      }
-      if (alive) setPeerKeys(out);
-    })();
-    return () => { alive = false; };
-  }, [chatId, (chat?.members || []).join(",")]);
-
   const playTtt = async (m, cell) => {
     const next = tttMove(m.game, me.uid, cell);
     if (typeof next === "string") return Alert.alert("", next);
@@ -2567,7 +2410,6 @@ function ChatScreen({ ctx, chatId }) {
                 onVote={(m, o) => votePoll(m, o)}
                 onGameMove={(m, cell) => playTtt(m, cell)}
                 onReveal={(m) => revealViewOnce(m)}
-                decrypt={decryptMessage}
                 onQuotePress={() => item.m.replyTo && scrollToMessage(item.m.replyTo.id)} />
             )}
             ListEmptyComponent={<View style={{ transform: [{ scaleY: -1 }], alignItems: "center", marginTop: 40 }}><Text style={{ color: T.muted }}>Пока пусто — напишите первое сообщение</Text></View>}
@@ -2768,42 +2610,6 @@ function ChatScreen({ ctx, chatId }) {
         </Modal>
       )}
 
-      {e2eOpen && (
-        <ActionSheet T={T} onClose={() => setE2eOpen(false)}
-          header={
-            <View style={{ padding: 12, paddingTop: 4, gap: 6 }}>
-              <Text style={{ color: T.text, fontWeight: "700", fontSize: 15 }}>Секретный чат</Text>
-              <Text style={{ color: T.muted, fontSize: 12.5 }}>
-                Шифрование на устройстве (X25519 + XSalsa20-Poly1305). Сервер и база видят только шифротекст.
-                Приватный ключ не покидает телефон — на другом устройстве старые сообщения не откроются.
-              </Text>
-              <Text style={{ color: T.muted, fontSize: 12 }}>Ваш отпечаток: {fingerprint(myKeys?.pub)}</Text>
-              <Text style={{ color: T.muted, fontSize: 12 }}>
-                Отпечаток собеседника: {(() => {
-                  const peer = (chat.members || []).find(u => u !== me.uid);
-                  return peerKeys[peer] ? fingerprint(peerKeys[peer]) : "ключа ещё нет";
-                })()}
-              </Text>
-            </View>
-          }
-          items={[{
-            label: "📷  Сверить ключи по QR",
-            onPress: () => {
-              const peer = (chat.members || []).find(u => u !== me.uid);
-              if (!peerKeys[peer]) return Alert.alert("", "У собеседника ещё нет ключа");
-              setFpScan(peerKeys[peer]);
-            },
-          }, {
-            label: chat.e2e ? "🔓  Выключить шифрование" : "🔒  Включить шифрование",
-            onPress: async () => {
-              const peer = (chat.members || []).find(u => u !== me.uid);
-              if (!chat.e2e && !peerKeys[peer]) return Alert.alert("", "Собеседник ещё не заходил в 3.0 — ключа нет");
-              try { await updateDoc(doc(db, "chats", chat.id), { e2e: !chat.e2e }); }
-              catch (e) { Alert.alert("Ошибка", ruError(e)); }
-            },
-          }]} />
-      )}
-      {fpScan && <FingerprintScanModal T={T} expectedPub={fpScan} onClose={() => setFpScan(null)} />}
       {ttlOpen && (
         <ActionSheet T={T} onClose={() => setTtlOpen(false)}
           header={<Text style={{ color: T.muted, fontSize: 12.5, padding: 12, paddingTop: 4 }}>
@@ -2847,7 +2653,6 @@ function ChatScreen({ ctx, chatId }) {
           { label: "📊  Опрос", onPress: () => setPollOpen(true) },
           { label: "⏰  Отложенная отправка", onPress: () => setSchedOpen(true) },
           { label: `🔥  Исчезающие: ${ttlLabel(chat?.ttl || 0)}`, onPress: () => setTtlOpen(true) },
-          ...(chat?.type === "private" ? [{ label: chat.e2e ? "🔒  Секретный чат: вкл" : "🔓  Включить шифрование", onPress: () => setE2eOpen(true) }] : []),
           ...(chat?.type === "private" ? [{
             label: "🎮  Крестики-нолики",
             onPress: async () => {
@@ -2964,10 +2769,9 @@ function TttBubble({ T, m, mine, meUid, onMove }) {
   );
 }
 
-function MessageBubble({ T, m, mine, meUid, group, lastReadByOthers, saved, onLongPress, onPhoto, onDoubleTap, onSwipeReply, onMention, onInvite, onQuotePress, onVote, onGameMove, onReveal, decrypt }) {
+function MessageBubble({ T, m, mine, meUid, group, lastReadByOthers, saved, onLongPress, onPhoto, onDoubleTap, onSwipeReply, onMention, onInvite, onQuotePress, onVote, onGameMove, onReveal }) {
   const lastTap = useRef(0);
-  // В секретном чате текста в документе нет — расшифровываем на месте
-  const bodyText = m.enc ? (decrypt ? decrypt(m) : "🔒 Зашифровано") : m.text;
+  const bodyText = m.text;
   const read = mine && lastReadByOthers >= m.createdAt;
   const pan = useRef(new Animated.Value(0)).current;
   const responder = useRef(PanResponder.create({

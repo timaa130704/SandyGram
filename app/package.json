@@ -19,16 +19,13 @@
     "expo-image-picker": "~57.0.8",
     "expo-local-authentication": "~57.0.2",
     "expo-notifications": "~57.0.9",
-    "expo-screen-capture": "^57.0.1",
     "expo-secure-store": "~57.0.1",
-    "expo-sharing": "^57.0.11",
     "expo-status-bar": "~57.0.1",
     "firebase": "^12.17.1",
     "react": "19.2.3",
     "react-native": "0.86.2",
     "react-native-safe-area-context": "~5.7.0",
-    "react-native-webrtc": "^124.0.8",
-    "tweetnacl": "^1.0.3"
+    "react-native-webrtc": "^124.0.8"
   },
   "scripts": {
     "start": "expo start",

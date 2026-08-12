@@ -300,18 +300,6 @@ await expectDenied("outsider cannot move in game", () =>
   updateDoc(doc(guest2.db, "chats", gid, "messages", gm.id), {
     game: { kind: "ttt", players: [uidOwner, uidMember], board: "X--------", turn: uidMember, winner: null } }));
 
-// Секретные чаты: конверты enc только для участников чата
-await updateDoc(doc(owner.db, "chats", dmId), { e2e: true });
-check("dm member turns on e2e", (await getDoc(doc(admin.db, "chats", dmId))).data().e2e === true);
-await setDoc(doc(collection(owner.db, "chats", dmId, "messages")), {
-  sender: uidOwner, senderName: "fowner", createdAt: Date.now(), reactions: {}, topicId: "general",
-  enc: { [uidOwner]: { n: "bm9uY2U=", c: "Y2lwaGVy" }, [uidAdmin]: { n: "bm9uY2U=", c: "Y2lwaGVy" } } });
-check("encrypted message allowed", true);
-await expectDenied("enc envelope for outsider denied", () =>
-  setDoc(doc(collection(owner.db, "chats", dmId, "messages")), {
-    sender: uidOwner, senderName: "fowner", createdAt: Date.now(), reactions: {}, topicId: "general",
-    enc: { [uidGuest2]: { n: "bm9uY2U=", c: "Y2lwaGVy" } } }));
-
 // Кубик: значение обязано лежать в пределах граней, лишних полей нет
 await setDoc(doc(collection(owner.db, "chats", gid, "messages")), {
   sender: uidOwner, senderName: "fowner", createdAt: Date.now(), reactions: {}, topicId: "general",

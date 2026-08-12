@@ -19,7 +19,6 @@ import {
   TTL_OPTIONS, ttlLabel, ttlLeft, isExpired,
   foldersWithCounts, chatsInFolder, newTttGame, tttMove, tttWinner, tttMark,
 } from "/sg30.js";
-import { ensureKeyPair, sealForMembers, openForMe, fingerprint, exportKeyBackup, importKeyBackup, restoreKeyPair } from "/sge2e.js";
 
 const fbApp = initializeApp(window.FIREBASE_CONFIG);
 const auth = getAuth(fbApp);
@@ -466,7 +465,6 @@ onAuthStateChanged(auth, async (user) => {
   if (!profile) profile = await promptNewUsername(user);  // новый вход через Google — выбираем имя
   if (!profile) { await signOut(auth); return; }
   me = { uid: user.uid, ...profile };
-  await setupE2E();
   showMessenger();
   registerSession();
 });
@@ -1397,85 +1395,6 @@ function openCreatePollModal() {
   });
 }
 
-// ---------- 3.0: секретные чаты (сквозное шифрование) ----------
-// Приватный ключ живёт в localStorage этого браузера и никуда не уходит.
-// Публичный публикуем в users/{uid}.e2ePub, чтобы собеседник мог зашифровать нам.
-let myKeys = null;
-const e2eStorage = {
-  get: (k) => localStorage.getItem(k),
-  set: (k, v) => (v ? localStorage.setItem(k, v) : localStorage.removeItem(k)),
-};
-async function setupE2E() {
-  try {
-    myKeys = await ensureKeyPair(e2eStorage);
-    if (me.e2ePub !== myKeys.pub) {
-      await updateDoc(doc(dbf, "users", me.uid), { e2ePub: myKeys.pub });
-      me.e2ePub = myKeys.pub;
-    }
-  } catch (error) { console.warn("E2E недоступно:", error); myKeys = null; }
-}
-
-// Ключи собеседников: берём из их профилей (кэш пользователей уже есть)
-async function pubKeysFor(chat) {
-  const out = {};
-  for (const uid of chat.members) {
-    if (uid === me.uid) { out[uid] = myKeys?.pub; continue; }
-    const u = await fetchUser(uid);
-    out[uid] = u?.e2ePub || null;
-  }
-  return out;
-}
-
-// Расшифровка «на лету» при отрисовке: не нашли ключ — честно пишем об этом
-function decryptMessage(message) {
-  if (!message.enc) return message.text || "";
-  if (!myKeys) return "🔒 Зашифровано (нет ключа на этом устройстве)";
-  const senderPub = userCache.get(message.sender)?.e2ePub || (message.sender === me.uid ? myKeys.pub : null);
-  if (!senderPub) return "🔒 Зашифровано";
-  const text = openForMe(message, me.uid, senderPub, myKeys.secret);
-  return text === null ? "🔒 Не удалось расшифровать (ключ другого устройства)" : text;
-}
-
-// Включение/выключение шифрования в личном чате
-function openE2EModal(v) {
-  const on = !!v.raw?.e2e;
-  const group = v.type === "group";
-  const others = (v.raw?.members || []).filter(u => u !== me.uid);
-  const peerPub = userCache.get(others[0])?.e2ePub;
-  // В группе шифруем тем же способом: отдельный конверт каждому участнику.
-  // Схема sender keys не нужна, пока участников мало — правила и так режут enc восемью ключами.
-  const noKey = others.filter(u => !userCache.get(u)?.e2ePub);
-  const peerLine = group
-    ? `Участников с ключами: <b>${others.length - noKey.length} из ${others.length}</b>` +
-      (noKey.length ? `<br><small class="muted">Без ключа: ${noKey.map(u => escapeHtml(userCache.get(u)?.displayName || userCache.get(u)?.username || "участник")).join(", ")} — им нужно зайти в 3.0</small>` : "")
-    : `Отпечаток собеседника: <b>${escapeHtml(peerPub ? fingerprint(peerPub) : "ключа ещё нет")}</b>`;
-  openModal(`<h3>Секретный чат</h3>
-    <p class="modal-note">Сообщения шифруются на устройстве (X25519 + XSalsa20-Poly1305). Сервер, база и мы видим только шифротекст. Переписка читается лишь там, где лежит приватный ключ — на другом устройстве старые сообщения не откроются.${group ? " В группе сообщение шифруется отдельно для каждого участника, поэтому включить можно до 8 человек." : ""}</p>
-    <p class="modal-note">Ваш отпечаток: <b>${escapeHtml(fingerprint(myKeys?.pub))}</b><br>
-    ${peerLine}<br>
-    Сверьте их лично, голосом или по QR — совпали, значит посредника нет.</p>
-    <div id="fpQr" class="qr-frame" style="display:none;justify-content:center;margin:8px 0"></div>
-    <div class="modal-actions"><button class="cancel">Закрыть</button><button id="fpQrBtn">Показать QR</button><button class="confirm">${on ? "Выключить" : "Включить"}</button></div>`);
-  // QR с отпечатком: собеседник сверяет картинку, а не диктует 16 символов голосом
-  $("#fpQrBtn").addEventListener("click", () => {
-    const box = $("#fpQr");
-    if (box.style.display !== "none") { box.style.display = "none"; box.innerHTML = ""; $("#fpQrBtn").textContent = "Показать QR"; return; }
-    box.style.display = "flex"; box.innerHTML = "";
-    new QRCode(box, { text: `sgfp:${myKeys?.pub || ""}`, width: 180, height: 180, correctLevel: QRCode.CorrectLevel.M });
-    $("#fpQrBtn").textContent = "Скрыть QR";
-  });
-  $("#modal .cancel").addEventListener("click", closeModal);
-  $("#modal .confirm").addEventListener("click", async () => {
-    if (!on && group && noKey.length) return toast(`Нет ключей у ${noKey.length} участник(ов) — пусть зайдут в 3.0`);
-    if (!on && !group && !peerPub) return toast("Собеседник ещё не заходил в 3.0 — ключа нет");
-    try {
-      await updateDoc(doc(dbf, "chats", v.id), { e2e: !on });
-      closeModal();
-      toast(!on ? "Шифрование включено 🔒" : "Шифрование выключено");
-    } catch (error) { toast(ruError(error)); }
-  });
-}
-
 // ---------- 3.0: исчезающие сообщения ----------
 function openTtlModal(v) {
   const cur = v.raw?.ttl || 0;
@@ -1686,7 +1605,7 @@ function buildMessageNode(message) {
     ${message.media ? renderMediaHtml(message) : ""}
     ${message.game ? renderGameHtml(message) : ""}
     ${message.dice ? `<span class="dice-msg" title="Бросок ${escapeHtml(String(message.dice.sides || 6))}-гранного кубика">🎲 <b>${escapeHtml(String(message.dice.value))}</b><small>из ${escapeHtml(String(message.dice.sides || 6))}</small></span>` : ""}
-    <span class="msg-text">${formatMessageText(message.enc ? decryptMessage(message) : (message.text || ""))}</span>
+    <span class="msg-text">${formatMessageText(message.text || "")}</span>
     <span class="meta"><span class="edited">${message.editedAt ? "изм. " : ""}</span>${renderTtlHtml(message)}${formatTime(message.createdAt)} ${ticksFor(message)}</span>
     <div class="reactions"></div>
   </div>`;
@@ -1897,13 +1816,6 @@ async function sendMessage({ text = "", image = null, sticker = null, voice = nu
   // клиент прячет просроченное сразу, а окончательно удаляет push-worker.
   if (chat.ttl > 0) message.expiresAt = message.createdAt + chat.ttl;
   if (forwardedFrom) message.forwardedFrom = forwardedFrom;
-  // Секретный чат: текст уезжает конвертами enc[uid], plaintext в базу не попадает
-  if (chat.e2e && message.text) {
-    if (!myKeys) throw new Error("Нет ключа шифрования на этом устройстве");
-    const pubs = await pubKeysFor(chat);
-    message.enc = sealForMembers(chat.members, pubs, myKeys.secret, message.text);
-    message.text = "";
-  }
   if (!toChatId && replyTarget) message.replyTo = { id: replyTarget.id, sender: replyTarget.senderName, text: replyTarget.text ? replyTarget.text.slice(0, 120) : "📷 Фото" };
   // @упоминания → массив uid для уведомлений
   if (text) {
@@ -1930,7 +1842,7 @@ async function sendMessage({ text = "", image = null, sticker = null, voice = nu
   const mediaPreview = media
     ? (media.kind === "video" ? "🎬 Видео" : media.kind === "audio" ? "🎵 Аудио" : media.kind === "image" ? "🖼 Изображение" : `📎 ${media.name || "Файл"}`)
     : "";
-  const previewText = (chat.e2e ? "🔒 Секретное сообщение" : message.text)
+  const previewText = message.text
     || (sticker ? "🧩 Стикер" : voice ? "🎤 Голосовое сообщение" : poll ? "📊 Опрос"
         : game ? "🎮 Крестики-нолики" : dice ? `🎲 ${dice.value}` : mediaPreview);
   const chatPatch = {
@@ -2443,8 +2355,6 @@ function showChatContextMenu(point, v) {
     <button data-act="poll">📊 Создать опрос</button>
     <button data-act="schedule">⏰ Отложенная отправка</button>
     ${v.type === "private" ? '<button data-act="game">🎮 Крестики-нолики</button>' : ""}
-    ${v.type === "private" || (v.type === "group" && isChatAdmin(v.raw) && (v.raw?.members || []).length <= 8)
-      ? `<button data-act="e2e">${v.raw?.e2e ? "🔒 Секретный чат: вкл" : "🔓 Включить шифрование"}</button>` : ""}
     <button data-act="ttl">🔥 Исчезающие: ${escapeHtml(ttlLabel(v.raw?.ttl || 0))}</button>
     <button data-act="folder">🗂 В папку…</button>
     ${v.type === "group" ? '<button data-act="topic"># Создать топик</button>' : ""}
@@ -2464,11 +2374,6 @@ function showChatContextMenu(point, v) {
       else if (act === "schedule") { if (currentChatId !== v.id) await openChat(v.id); openScheduleModal(); }
       else if (act === "game") { if (currentChatId !== v.id) await openChat(v.id); await startTttGame(); }
       else if (act === "ttl") openTtlModal(v);
-      else if (act === "e2e") {
-        // в группе нужны ключи всех участников — иначе конверт не собрать
-        for (const uid of (v.raw.members || [])) if (uid !== me.uid) await fetchUser(uid);
-        openE2EModal(v);
-      }
       else if (act === "folder") openFolderPickModal(v);
       else if (act === "clear") {
         openConfirm(`Очистить историю «${v.title}»? Удалятся сообщения, которые вы вправе удалять.`, async () => {
@@ -3082,7 +2987,6 @@ function openSecurityPanel() {
     <div class="sec-list">
       <button class="settings-row" data-sec="dm"><span class="row-icon">✉️</span><span>Кто может писать в личку: <b>${DM_MODE_RU[dmModeOf(myPrefs)]}</b></span></button>
       <button class="settings-row" data-sec="lock"><span class="row-icon">🔐</span><span>Код-замок: <b>${on(localStorage.getItem("sg_pin_hash"))}</b></span></button>
-      <button class="settings-row" data-sec="backup"><span class="row-icon">🗝</span><span>Резервная копия ключа шифрования</span></button>
       <button class="settings-row" data-sec="sessions"><span class="row-icon">💻</span><span>Активные сессии</span></button>
       <button class="settings-row" data-sec="log"><span class="row-icon">📜</span><span>Журнал безопасности</span></button>
     </div>
@@ -3095,49 +2999,8 @@ function openSecurityPanel() {
     const what = b.dataset.sec;
     if (what === "dm") { openDmModePanel(); return; }
     else if (what === "lock") openPinSetup();
-    else if (what === "backup") openKeyBackup();
     else if (what === "sessions") openSessions();
     else if (what === "log") openSecLog();
-  });
-}
-
-// ---------- резервная копия ключа шифрования ----------
-function openKeyBackup() {
-  openModal(`<h3>Резервная копия ключа</h3>
-    <p class="muted" style="font-size:13px">Ключ секретных чатов хранится только на этом устройстве. Копия зашифрована парольной фразой: без неё её не прочитает никто, включая нас. Забудете фразу — копия бесполезна.</p>
-    <label class="field"><span>Парольная фраза (от 8 символов)</span><input id="kbPass" type="password" autocomplete="new-password" /></label>
-    <div class="modal-actions">
-      <button class="cancel">Отмена</button>
-      <button id="kbRestore">Восстановить из файла</button>
-      <button class="confirm" id="kbSave">Сохранить копию</button>
-    </div>
-    <input type="file" id="kbFile" accept=".sgkey,application/json" hidden />`);
-  $("#modal .cancel").addEventListener("click", closeModal);
-  $("#kbSave").addEventListener("click", async () => {
-    try {
-      if (!myKeys) throw new Error("На этом устройстве нет ключа шифрования");
-      const blob = exportKeyBackup(myKeys, $("#kbPass").value);
-      const url = URL.createObjectURL(new Blob([blob], { type: "application/json" }));
-      const a = document.createElement("a");
-      a.href = url; a.download = `sandygram-${me.username}.sgkey`; a.click();
-      URL.revokeObjectURL(url);
-      secLog("key_backup");
-      closeModal(); toast("Копия сохранена — храните файл и фразу отдельно");
-    } catch (err) { toast(err.message || ruError(err)); }
-  });
-  $("#kbRestore").addEventListener("click", () => $("#kbFile").click());
-  $("#kbFile").addEventListener("change", async (e) => {
-    const file = e.target.files?.[0];
-    if (!file) return;
-    try {
-      const pair = importKeyBackup(await file.text(), $("#kbPass").value);
-      await restoreKeyPair(e2eStorage, pair);
-      myKeys = pair;
-      await updateDoc(doc(dbf, "users", me.uid), { e2ePub: pair.pub });
-      me.e2ePub = pair.pub;
-      secLog("key_restore");
-      closeModal(); toast("Ключ восстановлен — старые секретные чаты снова читаются");
-    } catch (err) { toast(err.message || ruError(err)); }
   });
 }
 

@@ -121,17 +121,16 @@ service cloud.firestore {
             && request.resource.data.members.size() == resource.data.members.size() + 1
             && request.resource.data.diff(resource.data).affectedKeys().hasOnly(['members'])
             && !chatBanned())
-        // Исчезающие сообщения: таймер в ЛС/секретном чате ставит любой участник,
+        // Исчезающие сообщения: таймер в ЛС ставит любой участник,
         // в группе и канале — только админ (ветка ниже).
         || (isMember(resource)
             && resource.data.type != 'group' && resource.data.type != 'channel'
-            && request.resource.data.diff(resource.data).affectedKeys().hasOnly(['ttl', 'e2e'])
-            && (request.resource.data.get('ttl', null) == null || request.resource.data.ttl is int)
-            && (request.resource.data.get('e2e', null) == null || request.resource.data.e2e is bool))
+            && request.resource.data.diff(resource.data).affectedKeys().hasOnly(['ttl'])
+            && (request.resource.data.get('ttl', null) == null || request.resource.data.ttl is int))
         || (chatAdmin() && request.resource.data.diff(resource.data).affectedKeys().hasOnly([
             'lastRead', 'unread', 'pinnedBy', 'muted', 'typing', 'lastMessage', 'pinnedMessageId',
             'members', 'admins', 'mutes', 'bans', 'warns', 'title', 'avatar', 'avatarColor',
-            'inviteCode', 'generalClosed', 'topics', 'ttl', 'e2e'
+            'inviteCode', 'generalClosed', 'topics', 'ttl'
           ]));
       allow delete: if authed()
         && (resource.data.ownerUid == request.auth.uid
@@ -196,7 +195,7 @@ service cloud.firestore {
                 || (request.resource.data.text is string && request.resource.data.text.size() <= 4096))
             && (!('senderName' in request.resource.data) || request.resource.data.senderName == null
                 || (request.resource.data.senderName is string && request.resource.data.senderName.size() <= 64))
-            && mediaOk() && encOk() && diceOk()
+            && mediaOk() && diceOk()
             && (!('silent' in request.resource.data) || request.resource.data.silent is bool)
             && (!('expiresAt' in request.resource.data) || request.resource.data.expiresAt == null
                 || request.resource.data.expiresAt is int);
@@ -211,13 +210,6 @@ service cloud.firestore {
                 && request.resource.data.dice.value >= 1
                 && request.resource.data.dice.value <= request.resource.data.dice.sides
                 && request.resource.data.dice.keys().hasOnly(['value', 'sides']));
-        }
-        // Секретные чаты: сервер видит только конверты enc[uid] = {n, c}.
-        // Правила лишь ограничивают размер — прочитать содержимое нельзя ни нам, ни Google.
-        function encOk() {
-          return !('enc' in request.resource.data)
-            || (request.resource.data.enc.keys().hasOnly(chatData().members)
-                && request.resource.data.enc.keys().size() <= 8);
         }
         // Медиа 3.0: в документе только ссылка на R2 нашего воркера, а не произвольный URL,
         // иначе через ленту чата можно было бы раздавать чужие адреса и трекеры.
