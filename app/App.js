@@ -1580,6 +1580,8 @@ function ChatScreen({ ctx, chatId }) {
   const [forwardNote, setForwardNote] = useState("");   // комментарий к пересылке
   const [reactPick, setReactPick] = useState(null);     // сообщение для полного эмодзи-пикера
   const [nextSilent, setNextSilent] = useState(false);  // следующее сообщение — без пуша
+  const [sel, setSel] = useState({ start: 0, end: 0 }); // выделение в поле ввода → панель форматирования
+  const [selForce, setSelForce] = useState(null);       // разовая установка курсора после форматирования
   const [forwardSel, setForwardSel] = useState(new Set());
   const [photoView, setPhotoView] = useState(null);
   const [infoOpen, setInfoOpen] = useState(false);
@@ -1856,6 +1858,24 @@ function ChatScreen({ ctx, chatId }) {
     const a = res.assets?.[0];
     if (res.canceled || !a) return;
     await uploadAndSend(await assetToFile(a.uri, a.name || "file", a.mimeType || "application/octet-stream"));
+  };
+  // Форматирование выделенного куска: оборачиваем в ту же разметку, что понимает MentionText
+  const applyFormat = (mark) => {
+    const { start, end } = sel;
+    if (start === end) return;
+    const picked = text.slice(start, end);
+    const inner = picked
+      .replace(/```([\s\S]*?)```/g, "$1").replace(/\|\|([\s\S]+?)\|\|/g, "$1")
+      .replace(/\*\*([^*\n]+)\*\*/g, "$1").replace(/~~([^~\n]+)~~/g, "$1")
+      .replace(/\*([^*\n]+)\*/g, "$1").replace(/`([^`\n]+)`/g, "$1");
+    // тот же значок второй раз — снимаем форматирование
+    const already = mark && picked.startsWith(mark) && picked.endsWith(mark) && picked.length > mark.length * 2;
+    const out = !mark || already ? inner : `${mark}${inner}${mark}`;
+    const val = text.slice(0, start) + out + text.slice(end);
+    setText(val);
+    setSel({ start: start + out.length, end: start + out.length });
+    setSelForce({ start: start + out.length, end: start + out.length });
+    AsyncStorage.setItem(`draft_${chatId}`, val).catch(() => { });
   };
   const onChangeText = (val) => {
     setText(val);
@@ -2290,11 +2310,32 @@ function ChatScreen({ ctx, chatId }) {
               ))}
             </View>
           )}
+          {/* панель форматирования — появляется, когда в поле ввода что-то выделено */}
+          {canWrite && sel.end > sel.start && (
+            <View style={{ flexDirection: "row", alignItems: "center", gap: 4, paddingHorizontal: 10, paddingVertical: 6, backgroundColor: T.surface2 }}>
+              {[
+                { m: "**", label: "Ж", st: { fontWeight: "900" } },
+                { m: "*", label: "К", st: { fontStyle: "italic" } },
+                { m: "~~", label: "Ч", st: { textDecorationLine: "line-through" } },
+                { m: "`", label: "</>", st: { fontFamily: "monospace" } },
+                { m: "||", label: "Спойлер", st: {} },
+                { m: "", label: "Убрать", st: { opacity: 0.7 } },
+              ].map(b => (
+                <TouchableOpacity key={b.label} onPress={() => applyFormat(b.m)}
+                  style={{ paddingHorizontal: 11, paddingVertical: 6, borderRadius: 999, backgroundColor: T.surface }}>
+                  <Text style={{ color: T.text, fontSize: 14, ...b.st }}>{b.label}</Text>
+                </TouchableOpacity>
+              ))}
+            </View>
+          )}
           {canWrite ? (
             <View style={{ flexDirection: "row", alignItems: "flex-end", padding: 8, gap: 4, backgroundColor: T.surface }}>
               <TouchableOpacity onPress={() => setStickerOpen(true)} style={{ padding: 10 }}><MaterialIcons name="emoji-emotions" size={23} color={T.muted} /></TouchableOpacity>
               <TouchableOpacity onPress={() => setAttachOpen(true)} style={{ padding: 10 }}><MaterialIcons name="attach-file" size={23} color={T.muted} /></TouchableOpacity>
-              <TextInput value={text} onChangeText={onChangeText} placeholder={recording ? "Идёт запись…" : "Сообщение"} placeholderTextColor={recording ? T.danger : T.muted} multiline
+              {/* selection задаём только сразу после форматирования, иначе курсор прыгает при наборе */}
+              <TextInput value={text} onChangeText={onChangeText} selection={selForce}
+                onSelectionChange={(e) => { setSel(e.nativeEvent.selection); if (selForce) setSelForce(null); }}
+                placeholder={recording ? "Идёт запись…" : "Сообщение"} placeholderTextColor={recording ? T.danger : T.muted} multiline
                 style={{ flex: 1, backgroundColor: T.surface2, color: T.text, borderRadius: 20, paddingHorizontal: 16, paddingVertical: 10, maxHeight: 120, fontSize: 16 }} />
               <TouchableOpacity onPress={toggleRec} style={{ padding: 10 }}>
                 <MaterialIcons name={recording ? "stop-circle" : "mic"} size={23} color={recording ? T.danger : T.muted} />

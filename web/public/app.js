@@ -1698,7 +1698,76 @@ messageInput.addEventListener("input", () => {
     updateDoc(doc(dbf, "chats", currentChatId), { [`typing.${me.uid}`]: now }).catch(() => {});
   }
 });
+// ---------- меню форматирования выделенного текста (ПКМ в поле ввода) ----------
+// Как в Telegram: выделил кусок → правая кнопка → выбрал начертание.
+// Оборачиваем выделение в разметку, которую понимает formatMessageText.
+const FORMATS = [
+  { act: "b", label: "Жирный", mark: "**", css: "font-weight:800" },
+  { act: "i", label: "Курсив", mark: "*", css: "font-style:italic" },
+  { act: "s", label: "Зачёркнутый", mark: "~~", css: "text-decoration:line-through" },
+  { act: "code", label: "Моноширинный", mark: "`", css: "font-family:ui-monospace,Consolas,monospace" },
+  { act: "pre", label: "Блок кода", mark: "```", css: "font-family:ui-monospace,Consolas,monospace" },
+  { act: "spoiler", label: "Спойлер", mark: "||", css: "" },
+  { act: "clear", label: "Убрать форматирование", mark: "", css: "opacity:.75" },
+];
+const formatMenu = $("#formatMenu");
+const hideFormatMenu = () => formatMenu.classList.add("hidden");
+// Снять любую нашу разметку по краям и внутри выделения
+function stripMarkup(s) {
+  return s
+    .replace(/```([\s\S]*?)```/g, "$1")
+    .replace(/\|\|([\s\S]+?)\|\|/g, "$1")
+    .replace(/\*\*([^*\n]+)\*\*/g, "$1")
+    .replace(/~~([^~\n]+)~~/g, "$1")
+    .replace(/\*([^*\n]+)\*/g, "$1")
+    .replace(/`([^`\n]+)`/g, "$1");
+}
+function applyFormat(act) {
+  const start = messageInput.selectionStart, end = messageInput.selectionEnd;
+  if (start === end) return hideFormatMenu();
+  const val = messageInput.value;
+  const picked = val.slice(start, end);
+  const f = FORMATS.find(x => x.act === act);
+  if (!f) return hideFormatMenu();
+  const inner = stripMarkup(picked);
+  // повторный выбор того же начертания снимает его
+  const already = f.mark && picked.startsWith(f.mark) && picked.endsWith(f.mark) && picked.length > f.mark.length * 2;
+  const out = act === "clear" || already ? inner
+    : f.act === "pre" ? `\`\`\`\n${inner}\n\`\`\`` : `${f.mark}${inner}${f.mark}`;
+  messageInput.value = val.slice(0, start) + out + val.slice(end);
+  autoGrow(messageInput);
+  messageInput.focus();
+  messageInput.setSelectionRange(start, start + out.length);
+  hideFormatMenu();
+}
+messageInput.addEventListener("contextmenu", (e) => {
+  if (messageInput.selectionStart === messageInput.selectionEnd) return; // нет выделения — обычное меню браузера
+  e.preventDefault();
+  formatMenu.innerHTML = FORMATS.map(f =>
+    `<button type="button" data-act="${f.act}" style="${f.css}">${f.label}</button>`).join("");
+  const box = messageInput.getBoundingClientRect();
+  formatMenu.classList.remove("hidden");
+  // держим меню в пределах окна: у нижней кромки разворачиваем вверх
+  const w = formatMenu.offsetWidth, h = formatMenu.offsetHeight;
+  formatMenu.style.left = Math.max(8, Math.min(e.clientX, window.innerWidth - w - 8)) + "px";
+  formatMenu.style.top = Math.max(8, Math.min(e.clientY, box.top) - h - 6) + "px";
+});
+formatMenu.addEventListener("mousedown", (e) => e.preventDefault()); // не терять выделение
+formatMenu.addEventListener("click", (e) => {
+  const b = e.target.closest("button[data-act]");
+  if (b) applyFormat(b.dataset.act);
+});
+document.addEventListener("mousedown", (e) => { if (!formatMenu.contains(e.target)) hideFormatMenu(); });
+messageInput.addEventListener("blur", () => setTimeout(hideFormatMenu, 150));
 messageInput.addEventListener("keydown", (e) => {
+  // Горячие клавиши форматирования, как в Telegram
+  if ((e.ctrlKey || e.metaKey) && messageInput.selectionStart !== messageInput.selectionEnd) {
+    const k = e.key.toLowerCase();
+    const hot = e.shiftKey
+      ? { x: "s", m: "code", p: "spoiler", n: "clear" }[k]
+      : { b: "b", i: "i" }[k];
+    if (hot) { e.preventDefault(); applyFormat(hot); return; }
+  }
   const panel = $("#mentionPanel");
   const pickerOpen = panel && !panel.classList.contains("hidden");
   if (pickerOpen) {

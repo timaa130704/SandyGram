@@ -61,6 +61,7 @@ public partial class MainWindow : Window
     public MainWindow()
     {
         InitializeComponent();
+        BuildFormatMenu(); // ПКМ в поле ввода — начертания выделенного текста
         // тёмный заголовок окна (Windows 10 1809+)
         SourceInitialized += (_, _) =>
         {
@@ -1763,7 +1764,72 @@ void QrBtn_Click(object sender, RoutedEventArgs e)
             if (e.Key == Key.Enter || e.Key == Key.Tab) { e.Handled = true; InsertMentionSelected(); return; }
             if (e.Key == Key.Escape) { e.Handled = true; MentionBox.Visibility = Visibility.Collapsed; return; }
         }
+        // Горячие клавиши форматирования выделенного, как в Telegram
+        if ((Keyboard.Modifiers & ModifierKeys.Control) != 0 && MsgInput.SelectionLength > 0)
+        {
+            var shift = (Keyboard.Modifiers & ModifierKeys.Shift) != 0;
+            string? mark = e.Key switch
+            {
+                Key.B when !shift => "**",
+                Key.I when !shift => "*",
+                Key.X when shift => "~~",
+                Key.M when shift => "`",
+                Key.P when shift => "||",
+                Key.N when shift => "",
+                _ => null,
+            };
+            if (mark != null) { e.Handled = true; ApplyInputFormat(mark); return; }
+        }
         if (e.Key == Key.Enter) { e.Handled = true; SendBtn_Click(sender, e); }
+    }
+
+    // 3.0: обернуть выделенный кусок в разметку (пустой mark — снять форматирование)
+    void ApplyInputFormat(string mark)
+    {
+        var start = MsgInput.SelectionStart;
+        var len = MsgInput.SelectionLength;
+        if (len <= 0) return;
+        var picked = MsgInput.Text.Substring(start, len);
+        var inner = System.Text.RegularExpressions.Regex.Replace(picked, @"```([\s\S]*?)```", "$1");
+        inner = System.Text.RegularExpressions.Regex.Replace(inner, @"\|\|([\s\S]+?)\|\|", "$1");
+        inner = System.Text.RegularExpressions.Regex.Replace(inner, @"\*\*([^*\n]+)\*\*", "$1");
+        inner = System.Text.RegularExpressions.Regex.Replace(inner, @"~~([^~\n]+)~~", "$1");
+        inner = System.Text.RegularExpressions.Regex.Replace(inner, @"\*([^*\n]+)\*", "$1");
+        inner = System.Text.RegularExpressions.Regex.Replace(inner, @"`([^`\n]+)`", "$1");
+        // тот же значок второй раз — снимаем
+        var already = mark.Length > 0 && picked.StartsWith(mark) && picked.EndsWith(mark) && picked.Length > mark.Length * 2;
+        var outText = mark.Length == 0 || already ? inner : mark + inner + mark;
+        MsgInput.Text = MsgInput.Text.Remove(start, len).Insert(start, outText);
+        MsgInput.Select(start, outText.Length);
+        MsgInput.Focus();
+    }
+
+    // ПКМ по выделенному тексту в поле ввода — меню начертаний
+    void BuildFormatMenu()
+    {
+        var menu = new ContextMenu();
+        // штатные пункты остаются — своё меню заменяет системное целиком
+        menu.Items.Add(new MenuItem { Header = "Вырезать", Command = ApplicationCommands.Cut });
+        menu.Items.Add(new MenuItem { Header = "Копировать", Command = ApplicationCommands.Copy });
+        menu.Items.Add(new MenuItem { Header = "Вставить", Command = ApplicationCommands.Paste });
+        menu.Items.Add(new Separator());
+        var fmtItems = new List<MenuItem>();
+        foreach (var (header, mark) in new[]
+        {
+            ("Жирный  (Ctrl+B)", "**"), ("Курсив  (Ctrl+I)", "*"),
+            ("Зачёркнутый  (Ctrl+Shift+X)", "~~"), ("Моноширинный  (Ctrl+Shift+M)", "`"),
+            ("Спойлер  (Ctrl+Shift+P)", "||"), ("Убрать форматирование  (Ctrl+Shift+N)", ""),
+        })
+        {
+            var mi = new MenuItem { Header = header };
+            var mk = mark;
+            mi.Click += (_, _) => ApplyInputFormat(mk);
+            fmtItems.Add(mi);
+            menu.Items.Add(mi);
+        }
+        // без выделения форматировать нечего — гасим пункты
+        menu.Opened += (_, _) => { foreach (var mi in fmtItems) mi.IsEnabled = MsgInput.SelectionLength > 0; };
+        MsgInput.ContextMenu = menu;
     }
 
     // ---------- @-пикер упоминаний (десктоп) ----------
