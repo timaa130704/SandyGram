@@ -3051,7 +3051,9 @@ async function setDmMode(mode) {
   // иначе текущие диалоги оборвутся
   const peers = [...chats.values()].filter(c => c.type === "private").map(c => c.members.find(u => u !== me.uid)).filter(Boolean);
   const patch = { dmMode: mode, dmClosed: mode !== "all" };
-  if (mode !== "all") patch.dmAllow = [...new Set([...(myPrefs.dmAllow || []), ...peers])];
+  // "Только контакты" — чтобы текущие диалоги не оборвались, вносим уже открытые
+  // чаты в белый список. "Никто" ничего не вносит: там правило игнорирует dmAllow.
+  if (mode === "contacts") patch.dmAllow = [...new Set([...(myPrefs.dmAllow || []), ...peers])];
   await savePrefs(patch);
   secLog(mode === "all" ? "dm_open" : "dm_closed", DM_MODE_RU[mode]);
 }
@@ -3063,7 +3065,7 @@ function openDmModePanel() {
     <div class="sec-list">
       ${opt("all", "Все", "Любой пользователь может начать чат")}
       ${opt("contacts", "Только контакты", "Пишут лишь те, с кем у вас уже есть переписка. Когда вы сами кому-то напишете, он станет контактом")}
-      ${opt("none", "Никто", "Новые входящие запрещены. Список заморожен: пишут только те, с кем чат уже открыт")}
+      ${opt("none", "Никто", "Вам не сможет написать никто, даже те, с кем чат уже открыт")}
     </div>
     <div class="modal-actions"><button class="cancel">Назад</button></div>`);
   $("#modal .cancel").addEventListener("click", openSecurityPanel);
@@ -3084,7 +3086,7 @@ function openSecurityPanel() {
       <button class="settings-row" data-sec="sessions"><span class="row-icon">💻</span><span>Активные сессии</span></button>
       <button class="settings-row" data-sec="log"><span class="row-icon">📜</span><span>Журнал безопасности</span></button>
     </div>
-    <p class="muted" style="font-size:12.5px;margin-top:10px">Кто может писать в личку — проверяется правилами базы, а не только приложением. «Только контакты» — люди, с кем у вас уже есть переписка; «Никто» замораживает список: новый человек не начнёт чат.</p>
+    <p class="muted" style="font-size:12.5px;margin-top:10px">Кто может писать в личку — проверяется правилами базы, а не только приложением. «Только контакты» — люди, с кем у вас уже есть переписка; «Никто» — вам не напишет никто, даже уже открытые диалоги.</p>
     <div class="modal-actions"><button class="cancel">Закрыть</button></div>`);
   $("#modal .cancel").addEventListener("click", closeModal);
   $("#modal .sec-list").addEventListener("click", async (e) => {

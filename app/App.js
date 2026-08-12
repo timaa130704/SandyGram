@@ -1332,10 +1332,11 @@ function SecuritySheet({ ctx, onClose }) {
   };
   const setDmMode = async (mode) => {
     try {
-      // в закрытых режимах вносим в белый список всех, с кем уже есть чат — иначе диалоги оборвутся
+      // "Только контакты" вносит в белый список уже открытые чаты — иначе диалоги оборвутся.
+      // "Никто" ничего не вносит: правило игнорирует dmAllow и блокирует всех.
       const peers = [...chats.values()].filter(c => c.type === "private").map(c => (c.members || []).find(u => u !== me.uid)).filter(Boolean);
       const patch = { dmMode: mode, dmClosed: mode !== "all" };
-      if (mode !== "all") patch.dmAllow = [...new Set([...(myPrefs.dmAllow || []), ...peers])];
+      if (mode === "contacts") patch.dmAllow = [...new Set([...(myPrefs.dmAllow || []), ...peers])];
       await savePrefs(patch);
       secLog(me.uid, mode === "all" ? "dm_open" : "dm_closed", DM_MODE_RU[mode]);
       setView("main");
@@ -1429,7 +1430,7 @@ function SecuritySheet({ ctx, onClose }) {
             <ScrollView>
               {opt("all", "Все", "Любой может начать чат")}
               {opt("contacts", "Только контакты", "Пишут лишь те, с кем у вас уже есть переписка. Когда вы сами кому-то напишете, он станет контактом.")}
-              {opt("none", "Никто", "Новые входящие запрещены. Список заморожен: пишут только те, с кем чат уже открыт.")}
+              {opt("none", "Никто", "Вам не сможет написать никто, даже те, с кем чат уже открыт.")}
               <TouchableOpacity onPress={() => setView("main")} style={{ marginTop: 8, padding: 12, alignItems: "center" }}><Text style={{ color: T.muted }}>Назад</Text></TouchableOpacity>
             </ScrollView>
           );

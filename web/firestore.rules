@@ -149,8 +149,7 @@ service cloud.firestore {
         //   'all'      — писать может кто угодно;
         //   'contacts' — только те, кто уже в dmAllow (люди, с кем есть переписка);
         //                клиент добавляет собеседника в dmAllow, когда сам ему пишет;
-        //   'none'     — тоже только dmAllow, но клиент новых не добавляет: список
-        //                заморожен, новый человек начать чат не сможет.
+        //   'none'     — не может НИКТО, включая уже открытые диалоги (dmAllow игнорируется).
         // Старое поле dmClosed=true понимается как 'contacts' для обратной совместимости.
         function recipient() {
           let m = chatData().members;
@@ -165,7 +164,8 @@ service cloud.firestore {
         }
         function dmAllowed() {
           return !exists(/databases/$(database)/documents/users/$(recipient())/private/prefs)
-            || (!(request.auth.uid in recPrefs().get('blocked', []))
+            || (recMode() != 'none'
+                && !(request.auth.uid in recPrefs().get('blocked', []))
                 && (recMode() == 'all'
                     || request.auth.uid in recPrefs().get('dmAllow', [])));
         }

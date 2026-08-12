@@ -352,11 +352,14 @@ await expectDenied("dmMode=contacts blocks stranger", () =>
 await setDoc(doc(collection(admin.db, "chats", dmId, "messages")), {
   sender: uidAdmin, senderName: "fadmin", createdAt: Date.now(), reactions: {}, topicId: "general", text: "мне можно" });
 check("dmMode=contacts allows dmAllow peer", true);
-// Режим 'none' тоже гейтит по dmAllow: не входящий в список — заблокирован.
-await setDoc(doc(owner.db, "users", uidOwner, "private", "prefs"), { dmMode: "none" }, { merge: true });
+// Режим 'none' — жёсткая блокировка: не пишет НИКТО, даже тот, кто уже в dmAllow.
+await setDoc(doc(owner.db, "users", uidOwner, "private", "prefs"), { dmMode: "none", dmAllow: [uidAdmin] }, { merge: true });
 await expectDenied("dmMode=none blocks non-listed", () =>
   setDoc(doc(collection(member.db, "chats", dmC, "messages")), {
     sender: uidMember, senderName: "fmember", createdAt: Date.now(), reactions: {}, topicId: "general", text: "спам2" }));
+await expectDenied("dmMode=none blocks even dmAllow contact", () =>
+  setDoc(doc(collection(admin.db, "chats", dmId, "messages")), {
+    sender: uidAdmin, senderName: "fadmin", createdAt: Date.now(), reactions: {}, topicId: "general", text: "я в списке, но нельзя" }));
 // Старое поле dmClosed=true работает как 'contacts' (обратная совместимость).
 await setDoc(doc(owner.db, "users", uidOwner, "private", "prefs"), { dmMode: deleteField(), dmClosed: true }, { merge: true });
 await expectDenied("legacy dmClosed blocks stranger", () =>
