@@ -444,6 +444,7 @@ void QrBtn_Click(object sender, RoutedEventArgs e)
             var chatId = $"dm_{ids[0]}_{ids[1]}";
             var existing = await Fire.GetDocAsync($"chats/{chatId}");
             if (existing == null)
+            {
                 await Fire.SetDocAsync($"chats/{chatId}", new()
                 {
                     ["type"] = "private",
@@ -454,11 +455,32 @@ void QrBtn_Click(object sender, RoutedEventArgs e)
                     ["pinnedBy"] = new List<object?>(),
                     ["muted"] = new List<object?>(),
                 });
+                await AllowPeerReplyAsync(targetUid);
+            }
             NewChatPanel.Visibility = Visibility.Collapsed;
             await PollChatsAsync();
             await OpenChatAsync(chatId);
         }
         catch (FireException ex) { MessageBox.Show(ex.Ru, "SandyGram"); }
+    }
+
+    // Я сам начал чат — разрешаю собеседнику отвечать (в режиме «Никто» список заморожен).
+    async Task AllowPeerReplyAsync(string peerUid)
+    {
+        try
+        {
+            var prefs = await Fire.GetDocAsync($"users/{Fire.Uid}/private/prefs");
+            var f = prefs?["fields"];
+            var mode = f == null ? "all" : Fire.FStr(f, "dmMode");
+            if (mode.Length == 0) mode = (f != null && Fire.FBool(f, "dmClosed")) ? "contacts" : "all";
+            if (mode == "none") return;
+            var allow = (f == null ? new List<object?>() : Fire.FList(f, "dmAllow")).Select(x => x?.ToString()).ToList();
+            if (allow.Contains(peerUid)) return;
+            allow.Add(peerUid);
+            await Fire.PatchDocAsync($"users/{Fire.Uid}/private/prefs",
+                new Dictionary<string, object?> { ["dmAllow"] = allow.Cast<object?>().ToList() });
+        }
+        catch { /* необязательное удобство, не критично */ }
     }
 
     async void CreateGroup_Click(object sender, RoutedEventArgs e) => await CreateGroupChatAsync("group");

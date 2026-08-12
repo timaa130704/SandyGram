@@ -145,8 +145,13 @@ service cloud.firestore {
             || request.auth.uid in chatData().get('admins', []);
         }
         // В ЛС нельзя писать тому, кто вас заблокировал или закрыл личку.
-        // Закрытая личка: пишут только те, кому получатель писал сам —
-        // клиент добавляет собеседника в dmAllow, когда отвечает ему.
+        // Три режима приватности личных сообщений (users/{uid}/private/prefs.dmMode):
+        //   'all'      — писать может кто угодно;
+        //   'contacts' — только те, кто уже в dmAllow (люди, с кем есть переписка);
+        //                клиент добавляет собеседника в dmAllow, когда сам ему пишет;
+        //   'none'     — тоже только dmAllow, но клиент новых не добавляет: список
+        //                заморожен, новый человек начать чат не сможет.
+        // Старое поле dmClosed=true понимается как 'contacts' для обратной совместимости.
         function recipient() {
           let m = chatData().members;
           return m[0] == request.auth.uid ? m[1] : m[0];
@@ -154,10 +159,14 @@ service cloud.firestore {
         function recPrefs() {
           return get(/databases/$(database)/documents/users/$(recipient())/private/prefs).data;
         }
+        function recMode() {
+          return recPrefs().get('dmMode',
+            recPrefs().get('dmClosed', false) == true ? 'contacts' : 'all');
+        }
         function dmAllowed() {
           return !exists(/databases/$(database)/documents/users/$(recipient())/private/prefs)
             || (!(request.auth.uid in recPrefs().get('blocked', []))
-                && (recPrefs().get('dmClosed', false) != true
+                && (recMode() == 'all'
                     || request.auth.uid in recPrefs().get('dmAllow', [])));
         }
         function msgMuted() {

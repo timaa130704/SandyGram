@@ -214,6 +214,7 @@ public static class Fire
     public static object? F(JsonNode fields, string key) => FromFs(fields[key]);
     public static string FStr(JsonNode fields, string key) => F(fields, key) as string ?? "";
     public static long FLong(JsonNode fields, string key) => F(fields, key) is long l ? l : 0;
+    public static bool FBool(JsonNode fields, string key) => F(fields, key) is bool b && b;
     public static List<object?> FList(JsonNode fields, string key) => F(fields, key) as List<object?> ?? new();
     public static Dictionary<string, object?> FMap(JsonNode fields, string key) => F(fields, key) as Dictionary<string, object?> ?? new();
 

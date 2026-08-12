@@ -344,14 +344,29 @@ await expectDenied("non-bool silent denied", () =>
 // Закрытая личка: чужой писать не может, а тот, кому мы писали сами (dmAllow) — может.
 const dmC = `dm_${[uidOwner, uidMember].sort().join("_")}`;
 await setDoc(doc(owner.db, "chats", dmC), { type: "private", members: [uidOwner, uidMember].sort(), createdAt: Date.now(), lastRead: {}, unread: {}, pinnedBy: [], muted: [] });
-await setDoc(doc(owner.db, "users", uidOwner, "private", "prefs"), { dmClosed: true, dmAllow: [uidAdmin] }, { merge: true });
-await expectDenied("closed DM blocks stranger", () =>
+// Режим 'contacts': чужой (не в dmAllow) писать не может, а тот, кто в dmAllow — может.
+await setDoc(doc(owner.db, "users", uidOwner, "private", "prefs"), { dmMode: "contacts", dmAllow: [uidAdmin] }, { merge: true });
+await expectDenied("dmMode=contacts blocks stranger", () =>
   setDoc(doc(collection(member.db, "chats", dmC, "messages")), {
     sender: uidMember, senderName: "fmember", createdAt: Date.now(), reactions: {}, topicId: "general", text: "спам" }));
 await setDoc(doc(collection(admin.db, "chats", dmId, "messages")), {
   sender: uidAdmin, senderName: "fadmin", createdAt: Date.now(), reactions: {}, topicId: "general", text: "мне можно" });
-check("closed DM allows dmAllow peer", true);
-await setDoc(doc(owner.db, "users", uidOwner, "private", "prefs"), { dmClosed: false }, { merge: true });
+check("dmMode=contacts allows dmAllow peer", true);
+// Режим 'none' тоже гейтит по dmAllow: не входящий в список — заблокирован.
+await setDoc(doc(owner.db, "users", uidOwner, "private", "prefs"), { dmMode: "none" }, { merge: true });
+await expectDenied("dmMode=none blocks non-listed", () =>
+  setDoc(doc(collection(member.db, "chats", dmC, "messages")), {
+    sender: uidMember, senderName: "fmember", createdAt: Date.now(), reactions: {}, topicId: "general", text: "спам2" }));
+// Старое поле dmClosed=true работает как 'contacts' (обратная совместимость).
+await setDoc(doc(owner.db, "users", uidOwner, "private", "prefs"), { dmMode: deleteField(), dmClosed: true }, { merge: true });
+await expectDenied("legacy dmClosed blocks stranger", () =>
+  setDoc(doc(collection(member.db, "chats", dmC, "messages")), {
+    sender: uidMember, senderName: "fmember", createdAt: Date.now(), reactions: {}, topicId: "general", text: "спам3" }));
+// Режим 'all' (личка открыта): пишет кто угодно.
+await setDoc(doc(owner.db, "users", uidOwner, "private", "prefs"), { dmMode: "all", dmClosed: false }, { merge: true });
+await setDoc(doc(collection(member.db, "chats", dmC, "messages")), {
+  sender: uidMember, senderName: "fmember", createdAt: Date.now(), reactions: {}, topicId: "general", text: "теперь можно" });
+check("dmMode=all allows anyone", true);
 
 // Чужие приватные настройки недоступны никому, кроме владельца
 await expectDenied("foreign prefs unreadable", () => getDoc(doc(admin.db, "users", uidOwner, "private", "prefs")));

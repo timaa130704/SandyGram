@@ -643,10 +643,16 @@ function SandyGram() {
       if (!ex || !ex.exists()) {
         await setDoc(doc(db, "chats", chatId), { type: "private", members: [me.uid, user.uid].sort(), createdAt: Date.now(), lastRead: {}, unread: {}, pinnedBy: [], muted: [] });
       }
+      // я сам начал чат — разрешаю собеседнику отвечать (в режиме «Никто» список заморожен)
+      if ((myPrefs.dmMode || (myPrefs.dmClosed ? "contacts" : "all")) !== "none" && !(myPrefs.dmAllow || []).includes(user.uid)) {
+        const next = [...new Set([...(myPrefs.dmAllow || []), user.uid])];
+        setDoc(doc(db, "users", me.uid, "private", "prefs"), { dmAllow: next }, { merge: true }).catch(() => { });
+        setMyPrefs(p => ({ ...p, dmAllow: next }));
+      }
       setUsers(prev => new Map(prev).set(user.uid, user));
       setScreen({ name: "chat", chatId });
     } catch (e) { Alert.alert("Ошибка", ruError(e)); }
-  }, [me]);
+  }, [me, myPrefs]);
   const openDmByName = useCallback(async (name) => {
     try {
       const reg = await getDoc(doc(db, "usernames", name));
@@ -1311,6 +1317,9 @@ async function registerSession(uid) {
   return sid;
 }
 
+const DM_MODE_RU = { all: "Все", contacts: "Только контакты", none: "Никто" };
+const dmModeOf = (p) => p?.dmMode || (p?.dmClosed ? "contacts" : "all");
+
 function SecuritySheet({ ctx, onClose }) {
   const { T, me, myPrefs, setMyPrefs, chats } = ctx;
   const [view, setView] = useState("main");
@@ -1321,14 +1330,15 @@ function SecuritySheet({ ctx, onClose }) {
     await setDoc(doc(db, "users", me.uid, "private", "prefs"), patch, { merge: true });
     setMyPrefs(p => ({ ...p, ...patch }));
   };
-  const toggleDm = async () => {
+  const setDmMode = async (mode) => {
     try {
-      const next = !myPrefs.dmClosed;
-      // тем, с кем уже есть личный чат, писать по-прежнему можно — иначе закрытая личка оборвёт диалоги
+      // в закрытых режимах вносим в белый список всех, с кем уже есть чат — иначе диалоги оборвутся
       const peers = [...chats.values()].filter(c => c.type === "private").map(c => (c.members || []).find(u => u !== me.uid)).filter(Boolean);
-      await savePrefs({ dmClosed: next, dmAllow: [...new Set([...(myPrefs.dmAllow || []), ...peers])] });
-      secLog(me.uid, next ? "dm_closed" : "dm_open");
-      Alert.alert("", next ? "Личка закрыта — новые люди писать не смогут" : "Личка открыта");
+      const patch = { dmMode: mode, dmClosed: mode !== "all" };
+      if (mode !== "all") patch.dmAllow = [...new Set([...(myPrefs.dmAllow || []), ...peers])];
+      await savePrefs(patch);
+      secLog(me.uid, mode === "all" ? "dm_open" : "dm_closed", DM_MODE_RU[mode]);
+      setView("main");
     } catch (e) { Alert.alert("Ошибка", ruError(e)); }
   };
   const openSessions = async () => {
@@ -1394,16 +1404,36 @@ function SecuritySheet({ ctx, onClose }) {
         </Text>
         {view === "main" && (
           <ScrollView>
-            <TouchableOpacity style={st.row} onPress={toggleDm}><Text style={{ color: T.text, fontSize: 16 }}>✉️  Закрытая личка: {myPrefs.dmClosed ? "вкл" : "выкл"}</Text></TouchableOpacity>
+            <TouchableOpacity style={st.row} onPress={() => setView("dm")}><Text style={{ color: T.text, fontSize: 16 }}>✉️  Кто может писать в личку: {DM_MODE_RU[dmModeOf(myPrefs)]}</Text></TouchableOpacity>
             <TouchableOpacity style={st.row} onPress={() => setView("backup")}><Text style={{ color: T.text, fontSize: 16 }}>🗝  Резервная копия ключа шифрования</Text></TouchableOpacity>
             <TouchableOpacity style={st.row} onPress={openSessions}><Text style={{ color: T.text, fontSize: 16 }}>💻  Активные сессии</Text></TouchableOpacity>
             <TouchableOpacity style={st.row} onPress={openLog}><Text style={{ color: T.text, fontSize: 16 }}>📜  Журнал безопасности</Text></TouchableOpacity>
             <Text style={{ color: T.muted, fontSize: 12.5, marginTop: 10 }}>
-              Закрытая личка: писать смогут только те, кому вы писали сами. Проверяется правилами базы, а не только приложением.
+              Кто может писать в личку — проверяется правилами базы, а не только приложением.
               Экран секретных чатов защищён от скриншотов.
             </Text>
           </ScrollView>
         )}
+        {view === "dm" && (() => {
+          const cur = dmModeOf(myPrefs);
+          const opt = (m, title, sub) => (
+            <TouchableOpacity key={m} style={{ flexDirection: "row", alignItems: "flex-start", gap: 10, paddingVertical: 11 }} onPress={() => setDmMode(m)}>
+              <Text style={{ fontSize: 18 }}>{cur === m ? "✅" : "▫️"}</Text>
+              <View style={{ flex: 1 }}>
+                <Text style={{ color: T.text, fontSize: 15.5, fontWeight: "700" }}>{title}</Text>
+                <Text style={{ color: T.muted, fontSize: 12.5 }}>{sub}</Text>
+              </View>
+            </TouchableOpacity>
+          );
+          return (
+            <ScrollView>
+              {opt("all", "Все", "Любой может начать чат")}
+              {opt("contacts", "Только контакты", "Пишут лишь те, с кем у вас уже есть переписка. Когда вы сами кому-то напишете, он станет контактом.")}
+              {opt("none", "Никто", "Новые входящие запрещены. Список заморожен: пишут только те, с кем чат уже открыт.")}
+              <TouchableOpacity onPress={() => setView("main")} style={{ marginTop: 8, padding: 12, alignItems: "center" }}><Text style={{ color: T.muted }}>Назад</Text></TouchableOpacity>
+            </ScrollView>
+          );
+        })()}
         {view === "sessions" && (
           <ScrollView>
             {rows.length === 0 && <Text style={{ color: T.muted }}>Записей нет</Text>}

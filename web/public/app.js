@@ -2642,6 +2642,10 @@ async function openDmWith(user) {
         });
       }
       userCache.set(user.uid, user);
+      // я сам начал чат — разрешаю собеседнику отвечать (в режиме «Никто» список заморожен)
+      if (dmModeOf(myPrefs) !== "none" && !(myPrefs.dmAllow || []).includes(user.uid)) {
+        savePrefs({ dmAllow: [...new Set([...(myPrefs.dmAllow || []), user.uid])] }).catch(() => {});
+      }
       // ждём, пока подписка подхватит чат
       for (let i = 0; i < 20 && !chats.has(chatId); i++) await new Promise(r => setTimeout(r, 100));
     }
@@ -3029,34 +3033,56 @@ async function savePrefs(patch) {
   await setDoc(doc(dbf, "users", me.uid, "private", "prefs"), patch, { merge: true });
   myPrefs = { ...myPrefs, ...patch };
 }
+const DM_MODE_RU = { all: "Все", contacts: "Только контакты", none: "Никто" };
+// старое поле dmClosed=true = 'contacts'
+function dmModeOf(prefs) { return prefs?.dmMode || (prefs?.dmClosed ? "contacts" : "all"); }
+async function setDmMode(mode) {
+  // при переходе в закрытые режимы вносим в белый список всех, с кем уже есть переписка,
+  // иначе текущие диалоги оборвутся
+  const peers = [...chats.values()].filter(c => c.type === "private").map(c => c.members.find(u => u !== me.uid)).filter(Boolean);
+  const patch = { dmMode: mode, dmClosed: mode !== "all" };
+  if (mode !== "all") patch.dmAllow = [...new Set([...(myPrefs.dmAllow || []), ...peers])];
+  await savePrefs(patch);
+  secLog(mode === "all" ? "dm_open" : "dm_closed", DM_MODE_RU[mode]);
+}
+function openDmModePanel() {
+  const cur = dmModeOf(myPrefs);
+  const opt = (m, title, sub) => `<button class="settings-row" data-mode="${m}">
+    <span class="row-icon">${cur === m ? "✅" : "▫️"}</span><span><b>${title}</b><br><span class="muted" style="font-size:12px">${sub}</span></span></button>`;
+  openModal(`<h3>Кто может писать в личку</h3>
+    <div class="sec-list">
+      ${opt("all", "Все", "Любой пользователь может начать чат")}
+      ${opt("contacts", "Только контакты", "Пишут лишь те, с кем у вас уже есть переписка. Когда вы сами кому-то напишете, он станет контактом")}
+      ${opt("none", "Никто", "Новые входящие запрещены. Список заморожен: пишут только те, с кем чат уже открыт")}
+    </div>
+    <div class="modal-actions"><button class="cancel">Назад</button></div>`);
+  $("#modal .cancel").addEventListener("click", openSecurityPanel);
+  $("#modal .sec-list").addEventListener("click", async (e) => {
+    const b = e.target.closest("button[data-mode]");
+    if (!b) return;
+    try { await setDmMode(b.dataset.mode); toast("Сохранено"); openSecurityPanel(); }
+    catch (err) { toast(ruError(err)); }
+  });
+}
 function openSecurityPanel() {
   const on = (v) => v ? "вкл" : "выкл";
   openModal(`<h3>Безопасность и приватность</h3>
     <div class="sec-list">
-      <button class="settings-row" data-sec="dm"><span class="row-icon">✉️</span><span>Закрытая личка: <b>${on(myPrefs.dmClosed)}</b></span></button>
+      <button class="settings-row" data-sec="dm"><span class="row-icon">✉️</span><span>Кто может писать в личку: <b>${DM_MODE_RU[dmModeOf(myPrefs)]}</b></span></button>
       <button class="settings-row" data-sec="lock"><span class="row-icon">🔐</span><span>Код-замок: <b>${on(localStorage.getItem("sg_pin_hash"))}</b></span></button>
       <button class="settings-row" data-sec="backup"><span class="row-icon">🗝</span><span>Резервная копия ключа шифрования</span></button>
       <button class="settings-row" data-sec="sessions"><span class="row-icon">💻</span><span>Активные сессии</span></button>
       <button class="settings-row" data-sec="log"><span class="row-icon">📜</span><span>Журнал безопасности</span></button>
     </div>
-    <p class="muted" style="font-size:12.5px;margin-top:10px">Закрытая личка: писать смогут только те, кому вы писали сами. Проверяется правилами базы, а не только приложением.</p>
+    <p class="muted" style="font-size:12.5px;margin-top:10px">Кто может писать в личку — проверяется правилами базы, а не только приложением. «Только контакты» — люди, с кем у вас уже есть переписка; «Никто» замораживает список: новый человек не начнёт чат.</p>
     <div class="modal-actions"><button class="cancel">Закрыть</button></div>`);
   $("#modal .cancel").addEventListener("click", closeModal);
   $("#modal .sec-list").addEventListener("click", async (e) => {
     const b = e.target.closest("button[data-sec]");
     if (!b) return;
     const what = b.dataset.sec;
-    if (what === "dm") {
-      const next = !myPrefs.dmClosed;
-      try {
-        // себе в белый список попадают все, с кем уже есть личный чат — иначе закрытая личка оборвёт текущие диалоги
-        const peers = [...chats.values()].filter(c => c.type === "private").map(c => c.members.find(u => u !== me.uid)).filter(Boolean);
-        await savePrefs({ dmClosed: next, dmAllow: [...new Set([...(myPrefs.dmAllow || []), ...peers])] });
-        secLog(next ? "dm_closed" : "dm_open");
-        toast(next ? "Личка закрыта — новые люди писать не смогут" : "Личка открыта");
-        openSecurityPanel();
-      } catch (err) { toast(ruError(err)); }
-    } else if (what === "lock") openPinSetup();
+    if (what === "dm") { openDmModePanel(); return; }
+    else if (what === "lock") openPinSetup();
     else if (what === "backup") openKeyBackup();
     else if (what === "sessions") openSessions();
     else if (what === "log") openSecLog();
