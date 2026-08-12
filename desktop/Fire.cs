@@ -150,9 +150,12 @@ public static class Fire
         }
     }
 
-    public static async Task<List<(string Id, JsonNode Fields)>> RunQueryAsync(object structuredQuery)
+    // parent — путь к документу-родителю для подколлекций (например users/{uid});
+    // пустой означает корень базы.
+    public static async Task<List<(string Id, JsonNode Fields)>> RunQueryAsync(object structuredQuery, string parent = "")
     {
-        var r = await http.SendAsync(await Req(HttpMethod.Post, $"{FsBase}:runQuery", new { structuredQuery }));
+        var url = parent.Length > 0 ? $"{FsBase}/{parent}:runQuery" : $"{FsBase}:runQuery";
+        var r = await http.SendAsync(await Req(HttpMethod.Post, url, new { structuredQuery }));
         var text = await r.Content.ReadAsStringAsync();
         var arr = JsonNode.Parse(text) as JsonArray ?? new JsonArray();
         var list = new List<(string, JsonNode)>();

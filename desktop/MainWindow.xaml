@@ -247,6 +247,7 @@
               <Button x:Name="NewChatBtn" Style="{StaticResource IconBtn}" ToolTip="Новый чат" Click="NewChatBtn_Click">
                 <TextBlock Text="✎" FontSize="15"/>
               </Button>
+              <Button x:Name="SecurityBtn" Style="{StaticResource IconBtn}" Content="🛡" ToolTip="Безопасность" Click="SecurityBtn_Click"/>
               <Button x:Name="LogoutBtn" Style="{StaticResource IconBtn}" Content="⏻" ToolTip="Выйти" Click="LogoutBtn_Click"/>
             </StackPanel>
           </Grid>

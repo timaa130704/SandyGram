@@ -761,3 +761,23 @@ input, textarea { font: inherit; color: inherit; background: none; border: 0; ou
   font-size: 14px; cursor: pointer;
 }
 .format-menu button:hover { background: var(--surface-2); }
+
+/* 3.0 блок C: безопасность и приватность */
+.sec-list { display: flex; flex-direction: column; gap: 4px; max-height: 300px; overflow-y: auto; margin: 6px 0; }
+.sec-item {
+  display: flex; align-items: center; justify-content: space-between; gap: 10px;
+  padding: 9px 11px; border-radius: var(--radius-s); background: var(--surface-2);
+  font-size: 13.5px; color: var(--text);
+}
+.sec-kill { border: 0; background: transparent; color: var(--danger); cursor: pointer; font-size: 13px; }
+#lockOverlay {
+  position: fixed; inset: 0; z-index: 999; display: flex; align-items: center; justify-content: center;
+  background: var(--bg);
+}
+.lock-card { display: flex; flex-direction: column; align-items: center; gap: 10px; color: var(--text); }
+.lock-emoji { font-size: 40px; }
+.lock-card input {
+  background: var(--surface-2); border: 1px solid var(--outline); color: var(--text);
+  border-radius: var(--radius-m); padding: 10px 14px; font-size: 20px; text-align: center; letter-spacing: 6px;
+}
+.lock-err { color: var(--danger); min-height: 18px; font-size: 13px; }

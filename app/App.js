@@ -25,12 +25,14 @@ import {
   TTL_OPTIONS, ttlLabel, ttlLeft, isExpired,
   foldersWithCounts, chatsInFolder, newTttGame, tttMove, tttMark,
 } from "./sg30";
-import { ensureKeyPair, sealForMembers, openForMe, fingerprint } from "./sge2e";
+import { ensureKeyPair, sealForMembers, openForMe, fingerprint, exportKeyBackup, importKeyBackup, restoreKeyPair } from "./sge2e";
 import { ref as dbRef, onValue, onChildAdded, set as dbSet, update as dbUpdate, push as dbPush, remove as dbRemove } from "firebase/database";
 import { CameraView, useCameraPermissions } from "expo-camera";
 import * as SecureStore from "expo-secure-store";
 import * as LocalAuthentication from "expo-local-authentication";
 import * as Crypto from "expo-crypto";
+import * as Sharing from "expo-sharing";
+import * as ScreenCapture from "expo-screen-capture";
 import { RTCPeerConnection, RTCView, mediaDevices } from "react-native-webrtc";
 import {
   createUserWithEmailAndPassword, signInWithEmailAndPassword, signOut, onAuthStateChanged,
@@ -498,6 +500,20 @@ function SandyGram() {
     return () => { clearInterval(t); sub.remove(); };
   }, [me?.uid]);
 
+  // ---- автоблокировка: код-замок снова просят после 5 минут в фоне ----
+  useEffect(() => {
+    if (!me?.uid) return;
+    let hidAt = 0;
+    const sub = AppState.addEventListener("change", async (state) => {
+      if (state !== "active") { hidAt = Date.now(); return; }
+      if (!hidAt || Date.now() - hidAt < 5 * 60e3) return;
+      hidAt = 0;
+      const pin = await SecureStore.getItemAsync("sandy_pin").catch(() => null);
+      if (pin) setPinLocked(true);
+    });
+    return () => sub.remove();
+  }, [me?.uid]);
+
   // ---- входящие звонки ----
   useEffect(() => {
     if (!me?.uid) return;
@@ -544,9 +560,20 @@ function SandyGram() {
   // ---- приватные настройки (чёрный список) ----
   useEffect(() => {
     if (!me?.uid) return;
-    getDoc(doc(db, "users", me.uid, "private", "prefs")).then(p => {
-      if (p.exists()) setMyPrefs({ blocked: [], hideLastSeen: false, ...p.data() });
-      else setMyPrefs({ blocked: [], hideLastSeen: false });
+    getDoc(doc(db, "users", me.uid, "private", "prefs")).then(async p => {
+      const data = p.exists() ? p.data() : {};
+      setMyPrefs({ blocked: [], hideLastSeen: false, ...data });
+      const sid = await registerSession(me.uid);
+      // «Выйти везде» с другого устройства: сессия старше метки — выходим сами
+      if (data.revokeBefore) {
+        const mine = await getDoc(doc(db, "users", me.uid, "sessions", sid)).catch(() => null);
+        const born = mine?.data()?.createdAt || 0;
+        if (born && born < data.revokeBefore) {
+          await AsyncStorage.removeItem("sg_session_id").catch(() => { });
+          Alert.alert("", "Сессия завершена с другого устройства");
+          signOut(auth).catch(() => { });
+        }
+      }
     }).catch(() => { });
   }, [me?.uid]);
 
@@ -1163,6 +1190,45 @@ function StoryViewer({ ctx, uid, onClose, onAdd }) {
 }
 
 // ================================== QR-СКАНЕР (вход на ПК)
+// Сверка ключей: на компьютере открыт QR с отпечатком, телефон его сканирует.
+// Рисовать QR на телефоне нечем (нет библиотеки), поэтому проверка односторонняя —
+// совпадение отпечатков всё равно доказывает отсутствие подмены.
+function FingerprintScanModal({ T, expectedPub, onClose }) {
+  const [perm, requestPerm] = useCameraPermissions();
+  const [status, setStatus] = useState(null);
+  const onScanned = ({ data }) => {
+    if (status || !data || !data.startsWith("sgfp:")) return;
+    const pub = data.slice(5);
+    setStatus(pub === expectedPub
+      ? { ok: true, text: "✔ Ключи совпадают — подмены нет" }
+      : { ok: false, text: "✖ Ключи РАЗНЫЕ. Не пишите ничего секретного." });
+  };
+  return (
+    <Modal transparent animationType="fade" onRequestClose={onClose}>
+      <View style={{ flex: 1, backgroundColor: "#000" }}>
+        {perm?.granted ? (
+          <CameraView style={StyleSheet.absoluteFill} facing="back" barcodeScannerSettings={{ barcodeTypes: ["qr"] }} onBarcodeScanned={onScanned} />
+        ) : (
+          <View style={{ flex: 1, alignItems: "center", justifyContent: "center", padding: 24 }}>
+            <Text style={{ color: "#fff", textAlign: "center", marginBottom: 14 }}>Нужен доступ к камере, чтобы считать QR с отпечатком</Text>
+            <TouchableOpacity onPress={requestPerm} style={{ padding: 13, paddingHorizontal: 22, borderRadius: 999, backgroundColor: T.inverse }}>
+              <Text style={{ color: T.onInverse, fontWeight: "800" }}>Разрешить</Text>
+            </TouchableOpacity>
+          </View>
+        )}
+        <View style={{ position: "absolute", left: 0, right: 0, bottom: 0, padding: 22, paddingBottom: 40, backgroundColor: "#000c" }}>
+          <Text style={{ color: status ? (status.ok ? "#4caf50" : "#ff6b6b") : "#fff", fontSize: 15, fontWeight: "700", textAlign: "center" }}>
+            {status ? status.text : "Откройте у собеседника «Отпечаток ключа» и наведите камеру"}
+          </Text>
+          <TouchableOpacity onPress={onClose} style={{ marginTop: 14, padding: 13, borderRadius: 999, backgroundColor: "#fff2", alignItems: "center" }}>
+            <Text style={{ color: "#fff", fontWeight: "700" }}>Закрыть</Text>
+          </TouchableOpacity>
+        </View>
+      </View>
+    </Modal>
+  );
+}
+
 function QrScannerModal({ visible, onClose }) {
   const [perm, requestPerm] = useCameraPermissions();
   const [captured, setCaptured] = useState(null);
@@ -1213,9 +1279,193 @@ function QrScannerModal({ visible, onClose }) {
     </Modal>
   );
 }
+
+// ================================================================ 3.0 БЛОК C: безопасность
+const SEC_EVENT_RU = {
+  login: "Вход на новом устройстве", logout_all: "Выход на всех устройствах",
+  key_backup: "Создана резервная копия ключа", key_restore: "Ключ восстановлен из копии",
+  pin_on: "Включён код-замок", pin_off: "Выключен код-замок",
+  dm_closed: "Личка закрыта", dm_open: "Личка открыта",
+};
+const secDateTime = (ms) => {
+  if (!ms) return "—";
+  const d = new Date(ms);
+  return `${d.toLocaleDateString("ru", { day: "numeric", month: "short" })}, ${d.getHours()}:${String(d.getMinutes()).padStart(2, "0")}`;
+};
+async function secLog(uid, type, detail = "") {
+  try {
+    await setDoc(doc(collection(db, "users", uid, "seclog")),
+      { type, detail: String(detail).slice(0, 200), at: Date.now(), platform: "Android" });
+  } catch { /* журнал не критичен */ }
+}
+// Сессия этого устройства. Отзыв токена умеет только Admin SDK, которого нет,
+// поэтому «выйти везде» — метка revokeBefore: клиент видит её и выходит сам.
+async function registerSession(uid) {
+  let sid = await AsyncStorage.getItem("sg_session_id");
+  const fresh = !sid;
+  if (fresh) { sid = Math.random().toString(36).slice(2) + Date.now().toString(36); await AsyncStorage.setItem("sg_session_id", sid); }
+  await setDoc(doc(db, "users", uid, "sessions", sid),
+    { platform: "android", label: "Приложение Android", lastSeen: Date.now(), ...(fresh ? { createdAt: Date.now() } : {}) },
+    { merge: true }).catch(() => { });
+  if (fresh) secLog(uid, "login", "новое устройство: Android");
+  return sid;
+}
+
+function SecuritySheet({ ctx, onClose }) {
+  const { T, me, myPrefs, setMyPrefs, chats } = ctx;
+  const [view, setView] = useState("main");
+  const [rows, setRows] = useState([]);
+  const [pass, setPass] = useState("");
+  const [busy, setBusy] = useState(false);
+  const savePrefs = async (patch) => {
+    await setDoc(doc(db, "users", me.uid, "private", "prefs"), patch, { merge: true });
+    setMyPrefs(p => ({ ...p, ...patch }));
+  };
+  const toggleDm = async () => {
+    try {
+      const next = !myPrefs.dmClosed;
+      // тем, с кем уже есть личный чат, писать по-прежнему можно — иначе закрытая личка оборвёт диалоги
+      const peers = [...chats.values()].filter(c => c.type === "private").map(c => (c.members || []).find(u => u !== me.uid)).filter(Boolean);
+      await savePrefs({ dmClosed: next, dmAllow: [...new Set([...(myPrefs.dmAllow || []), ...peers])] });
+      secLog(me.uid, next ? "dm_closed" : "dm_open");
+      Alert.alert("", next ? "Личка закрыта — новые люди писать не смогут" : "Личка открыта");
+    } catch (e) { Alert.alert("Ошибка", ruError(e)); }
+  };
+  const openSessions = async () => {
+    setView("sessions");
+    const snap = await getDocs(collection(db, "users", me.uid, "sessions")).catch(() => null);
+    const mine = await AsyncStorage.getItem("sg_session_id");
+    setRows(snap ? snap.docs.map(d => ({ id: d.id, mine: d.id === mine, ...d.data() })).sort((a, b) => (b.lastSeen || 0) - (a.lastSeen || 0)) : []);
+  };
+  const killAll = async () => {
+    try {
+      const mine = await AsyncStorage.getItem("sg_session_id");
+      await savePrefs({ revokeBefore: Date.now() });
+      for (const r of rows) if (!r.mine) await deleteDoc(doc(db, "users", me.uid, "sessions", r.id)).catch(() => { });
+      // своей сессии обновляем createdAt, иначе метка выкинет и нас
+      if (mine) await setDoc(doc(db, "users", me.uid, "sessions", mine), { createdAt: Date.now() + 1000 }, { merge: true }).catch(() => { });
+      secLog(me.uid, "logout_all");
+      Alert.alert("", "Остальные устройства выйдут при ближайшем запуске");
+      openSessions();
+    } catch (e) { Alert.alert("Ошибка", ruError(e)); }
+  };
+  const openLog = async () => {
+    setView("log");
+    const snap = await getDocs(query(collection(db, "users", me.uid, "seclog"), orderBy("at", "desc"), limit(50))).catch(() => null);
+    setRows(snap ? snap.docs.map(d => d.data()) : []);
+  };
+  const doBackup = async () => {
+    if (!myKeys) return Alert.alert("", "На этом устройстве нет ключа шифрования");
+    setBusy(true);
+    try {
+      // KDF намеренно долгий — на телефоне это несколько секунд
+      const blob = exportKeyBackup(myKeys, pass);
+      const path = `${FileSystem.cacheDirectory}sandygram-${me.username}.sgkey`;
+      await FileSystem.writeAsStringAsync(path, blob);
+      secLog(me.uid, "key_backup");
+      await Sharing.shareAsync(path, { mimeType: "application/json", dialogTitle: "Сохранить копию ключа" }).catch(() => { });
+      Alert.alert("", "Копия сохранена. Храните файл и фразу отдельно.");
+      setPass("");
+    } catch (e) { Alert.alert("Ошибка", e?.message || ruError(e)); }
+    finally { setBusy(false); }
+  };
+  const doRestore = async () => {
+    setBusy(true);
+    try {
+      const res = await DocumentPicker.getDocumentAsync({ copyToCacheDirectory: true, type: "*/*" });
+      const a = res.assets?.[0];
+      if (res.canceled || !a) return;
+      const pair = importKeyBackup(await FileSystem.readAsStringAsync(a.uri), pass);
+      await restoreKeyPair(e2eStorage, pair);
+      myKeys = pair;
+      await updateDoc(doc(db, "users", me.uid), { e2ePub: pair.pub });
+      secLog(me.uid, "key_restore");
+      Alert.alert("", "Ключ восстановлен — старые секретные чаты снова читаются");
+      setPass("");
+    } catch (e) { Alert.alert("Ошибка", e?.message || ruError(e)); }
+    finally { setBusy(false); }
+  };
+  return (
+    <Modal transparent animationType="slide" onRequestClose={onClose}>
+      <TouchableOpacity activeOpacity={1} onPress={onClose} style={{ flex: 1, backgroundColor: "#0008" }} />
+      <View style={{ backgroundColor: T.surface, borderTopLeftRadius: 28, borderTopRightRadius: 28, padding: 20, paddingBottom: 34, maxHeight: "82%" }}>
+        <Text style={{ color: T.text, fontSize: 18, fontWeight: "800", marginBottom: 10 }}>
+          {view === "main" ? "Безопасность и приватность" : view === "sessions" ? "Активные сессии" : view === "log" ? "Журнал безопасности" : "Резервная копия ключа"}
+        </Text>
+        {view === "main" && (
+          <ScrollView>
+            <TouchableOpacity style={st.row} onPress={toggleDm}><Text style={{ color: T.text, fontSize: 16 }}>✉️  Закрытая личка: {myPrefs.dmClosed ? "вкл" : "выкл"}</Text></TouchableOpacity>
+            <TouchableOpacity style={st.row} onPress={() => setView("backup")}><Text style={{ color: T.text, fontSize: 16 }}>🗝  Резервная копия ключа шифрования</Text></TouchableOpacity>
+            <TouchableOpacity style={st.row} onPress={openSessions}><Text style={{ color: T.text, fontSize: 16 }}>💻  Активные сессии</Text></TouchableOpacity>
+            <TouchableOpacity style={st.row} onPress={openLog}><Text style={{ color: T.text, fontSize: 16 }}>📜  Журнал безопасности</Text></TouchableOpacity>
+            <Text style={{ color: T.muted, fontSize: 12.5, marginTop: 10 }}>
+              Закрытая личка: писать смогут только те, кому вы писали сами. Проверяется правилами базы, а не только приложением.
+              Экран секретных чатов защищён от скриншотов.
+            </Text>
+          </ScrollView>
+        )}
+        {view === "sessions" && (
+          <ScrollView>
+            {rows.length === 0 && <Text style={{ color: T.muted }}>Записей нет</Text>}
+            {rows.map(r => (
+              <View key={r.id} style={{ flexDirection: "row", alignItems: "center", gap: 10, paddingVertical: 9 }}>
+                <View style={{ flex: 1 }}>
+                  <Text style={{ color: T.text, fontWeight: "700" }}>{r.label || r.platform}{r.mine ? " — это устройство" : ""}</Text>
+                  <Text style={{ color: T.muted, fontSize: 12 }}>активна {secDateTime(r.lastSeen || r.createdAt)}</Text>
+                </View>
+                {!r.mine && (
+                  <TouchableOpacity onPress={async () => { await deleteDoc(doc(db, "users", me.uid, "sessions", r.id)).catch(() => { }); openSessions(); }}>
+                    <Text style={{ color: T.danger }}>Убрать</Text>
+                  </TouchableOpacity>
+                )}
+              </View>
+            ))}
+            <Text style={{ color: T.muted, fontSize: 12.5, marginTop: 8 }}>
+              «Выйти везде» помечает старые сессии отозванными — клиент, увидев метку, выходит сам. Мгновенный отзыв токена требует серверного ключа, поэтому офлайн-устройство выйдет при следующем запуске.
+            </Text>
+            <TouchableOpacity onPress={killAll} style={{ marginTop: 12, padding: 13, borderRadius: 999, backgroundColor: T.danger, alignItems: "center" }}>
+              <Text style={{ color: "#fff", fontWeight: "800" }}>Выйти на всех устройствах</Text>
+            </TouchableOpacity>
+            <TouchableOpacity onPress={() => setView("main")} style={{ marginTop: 8, padding: 12, alignItems: "center" }}><Text style={{ color: T.muted }}>Назад</Text></TouchableOpacity>
+          </ScrollView>
+        )}
+        {view === "log" && (
+          <ScrollView>
+            {rows.length === 0 && <Text style={{ color: T.muted }}>Пока пусто</Text>}
+            {rows.map((r, i) => (
+              <View key={i} style={{ paddingVertical: 8 }}>
+                <Text style={{ color: T.text, fontWeight: "700" }}>{SEC_EVENT_RU[r.type] || r.type}</Text>
+                <Text style={{ color: T.muted, fontSize: 12 }}>{secDateTime(r.at)} · {r.platform || ""}{r.detail ? " · " + r.detail : ""}</Text>
+              </View>
+            ))}
+            <Text style={{ color: T.muted, fontSize: 12.5, marginTop: 8 }}>Записи только добавляются: правила базы не дают изменить их задним числом.</Text>
+            <TouchableOpacity onPress={() => setView("main")} style={{ marginTop: 8, padding: 12, alignItems: "center" }}><Text style={{ color: T.muted }}>Назад</Text></TouchableOpacity>
+          </ScrollView>
+        )}
+        {view === "backup" && (
+          <ScrollView>
+            <Text style={{ color: T.muted, fontSize: 13, marginBottom: 10 }}>
+              Ключ секретных чатов лежит только на этом телефоне. Копия шифруется парольной фразой: без неё её не прочитает никто, включая нас. Забудете фразу — копия бесполезна.
+            </Text>
+            <TextInput value={pass} onChangeText={setPass} secureTextEntry placeholder="Парольная фраза (от 8 символов)" placeholderTextColor={T.muted}
+              style={[st.input, { backgroundColor: T.surface2, color: T.text }]} />
+            <TouchableOpacity disabled={busy} onPress={doBackup} style={{ marginTop: 10, padding: 13, borderRadius: 999, backgroundColor: T.inverse, alignItems: "center", opacity: busy ? 0.6 : 1 }}>
+              <Text style={{ color: T.onInverse, fontWeight: "800" }}>{busy ? "Считаем ключ…" : "Сохранить копию"}</Text>
+            </TouchableOpacity>
+            <TouchableOpacity disabled={busy} onPress={doRestore} style={{ marginTop: 8, padding: 13, borderRadius: 999, backgroundColor: T.surface2, alignItems: "center", opacity: busy ? 0.6 : 1 }}>
+              <Text style={{ color: T.text, fontWeight: "700" }}>Восстановить из файла</Text>
+            </TouchableOpacity>
+            <TouchableOpacity onPress={() => setView("main")} style={{ marginTop: 8, padding: 12, alignItems: "center" }}><Text style={{ color: T.muted }}>Назад</Text></TouchableOpacity>
+          </ScrollView>
+        )}
+      </View>
+    </Modal>
+  );
+}
 // ================================================================ НАСТРОЙКИ
 function SettingsSheet({ ctx, onClose }) {
   const { T, me, setMe, themeName, toggleTheme } = ctx;
+  const [secOpen, setSecOpen] = useState(false);
   const togglePrivacy = async () => {
     try {
       const next = !me.hideLastSeen;
@@ -1299,6 +1549,8 @@ function SettingsSheet({ ctx, onClose }) {
           }}><Text style={{ color: T.text, fontSize: 16 }}>🎨  Сменить цвет аватара</Text></TouchableOpacity>
           <TouchableOpacity style={st.row} onPress={togglePrivacy}><Text style={{ color: T.text, fontSize: 16 }}>👁  Скрывать время захода: {me.hideLastSeen ? "вкл" : "выкл"}</Text></TouchableOpacity>
           <TouchableOpacity style={st.row} onPress={() => setQrScan(true)}><Text style={{ color: T.text, fontSize: 16 }}>📷  Войти на компьютере по QR</Text></TouchableOpacity>
+          <TouchableOpacity style={st.row} onPress={() => setSecOpen(true)}><Text style={{ color: T.text, fontSize: 16 }}>🛡  Безопасность и приватность</Text></TouchableOpacity>
+          {secOpen && <SecuritySheet ctx={ctx} onClose={() => setSecOpen(false)} />}
           <QrScannerModal visible={qrScan} onClose={() => setQrScan(false)} />         
           <TouchableOpacity style={st.row} onPress={deleteAccount}><Text style={{ color: T.danger, fontSize: 16 }}>🗑  Удалить аккаунт</Text></TouchableOpacity>
           <TouchableOpacity style={st.row} onPress={async () => {
@@ -1580,6 +1832,14 @@ function ChatScreen({ ctx, chatId }) {
   const [forwardNote, setForwardNote] = useState("");   // комментарий к пересылке
   const [reactPick, setReactPick] = useState(null);     // сообщение для полного эмодзи-пикера
   const [nextSilent, setNextSilent] = useState(false);  // следующее сообщение — без пуша
+  const [fpScan, setFpScan] = useState(null);           // сверка отпечатка ключа по QR
+
+  // Секретный чат: Android не даёт снять скриншот и не показывает чат в списке задач
+  useEffect(() => {
+    if (!chat?.e2e) return;
+    ScreenCapture.preventScreenCaptureAsync().catch(() => { });
+    return () => { ScreenCapture.allowScreenCaptureAsync().catch(() => { }); };
+  }, [chat?.e2e]);
   const [sel, setSel] = useState({ start: 0, end: 0 }); // выделение в поле ввода → панель форматирования
   const [selForce, setSelForce] = useState(null);       // разовая установка курсора после форматирования
   const [forwardSel, setForwardSel] = useState(new Set());
@@ -2491,6 +2751,13 @@ function ChatScreen({ ctx, chatId }) {
             </View>
           }
           items={[{
+            label: "📷  Сверить ключи по QR",
+            onPress: () => {
+              const peer = (chat.members || []).find(u => u !== me.uid);
+              if (!peerKeys[peer]) return Alert.alert("", "У собеседника ещё нет ключа");
+              setFpScan(peerKeys[peer]);
+            },
+          }, {
             label: chat.e2e ? "🔓  Выключить шифрование" : "🔒  Включить шифрование",
             onPress: async () => {
               const peer = (chat.members || []).find(u => u !== me.uid);
@@ -2500,6 +2767,7 @@ function ChatScreen({ ctx, chatId }) {
             },
           }]} />
       )}
+      {fpScan && <FingerprintScanModal T={T} expectedPub={fpScan} onClose={() => setFpScan(null)} />}
       {ttlOpen && (
         <ActionSheet T={T} onClose={() => setTtlOpen(false)}
           header={<Text style={{ color: T.muted, fontSize: 12.5, padding: 12, paddingTop: 4 }}>

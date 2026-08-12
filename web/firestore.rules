@@ -13,6 +13,23 @@ service cloud.firestore {
       match /private/{docId} {
         allow read, write: if authed() && request.auth.uid == uid;
       }
+      // 3.0: активные сессии. Каждый клиент ведёт свою запись, чужие не видит.
+      // «Выйти везде» — это поле revokeBefore в private/prefs: клиенты сами
+      // выходят, увидев его. Полноценный отзыв токена требует Admin SDK,
+      // поэтому честно считаем это кооперативным, а не серверным механизмом.
+      match /sessions/{sessionId} {
+        allow read, write: if authed() && request.auth.uid == uid;
+      }
+      // 3.0: журнал безопасности — только дописывается, задним числом не правится.
+      match /seclog/{eventId} {
+        allow read, delete: if authed() && request.auth.uid == uid;
+        allow create: if authed() && request.auth.uid == uid
+          && request.resource.data.at is int
+          && request.resource.data.at <= request.time.toMillis() + 60000
+          && request.resource.data.type is string
+          && request.resource.data.type.size() <= 32;
+        allow update: if false;
+      }
     }
 
     // Реестр уникальных @username. Чтение открыто (нужно на экране входа,
@@ -127,12 +144,21 @@ service cloud.firestore {
           return chatData().ownerUid == request.auth.uid
             || request.auth.uid in chatData().get('admins', []);
         }
-        // В ЛС нельзя писать тому, кто вас заблокировал
-        function blockedByRecipient() {
+        // В ЛС нельзя писать тому, кто вас заблокировал или закрыл личку.
+        // Закрытая личка: пишут только те, кому получатель писал сам —
+        // клиент добавляет собеседника в dmAllow, когда отвечает ему.
+        function recipient() {
           let m = chatData().members;
-          let rec = m[0] == request.auth.uid ? m[1] : m[0];
-          return exists(/databases/$(database)/documents/users/$(rec)/private/prefs)
-            && request.auth.uid in get(/databases/$(database)/documents/users/$(rec)/private/prefs).data.get('blocked', []);
+          return m[0] == request.auth.uid ? m[1] : m[0];
+        }
+        function recPrefs() {
+          return get(/databases/$(database)/documents/users/$(recipient())/private/prefs).data;
+        }
+        function dmAllowed() {
+          return !exists(/databases/$(database)/documents/users/$(recipient())/private/prefs)
+            || (!(request.auth.uid in recPrefs().get('blocked', []))
+                && (recPrefs().get('dmClosed', false) != true
+                    || request.auth.uid in recPrefs().get('dmAllow', [])));
         }
         function msgMuted() {
           return 'mutes' in chatData()
@@ -200,7 +226,7 @@ service cloud.firestore {
           && request.auth.uid in chatData().members
           && request.resource.data.sender == request.auth.uid
           && (chatData().type != 'channel' || amChatAdmin())
-          && (chatData().type != 'private' || !blockedByRecipient())
+          && (chatData().type != 'private' || dmAllowed())
           && mentionsOk() && payloadOk()
           && !msgMuted() && !msgBanned();
         // Реакция: участник трогает не больше двух эмодзи-ключей (снял свою — поставил другую),

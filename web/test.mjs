@@ -340,6 +340,40 @@ await expectDenied("non-bool silent denied", () =>
     sender: uidOwner, senderName: "fowner", createdAt: Date.now(), reactions: {}, topicId: "general",
     text: "тихо", silent: "yes" }));
 
+// ---------- 3.0 блок C: приватность ----------
+// Закрытая личка: чужой писать не может, а тот, кому мы писали сами (dmAllow) — может.
+const dmC = `dm_${[uidOwner, uidMember].sort().join("_")}`;
+await setDoc(doc(owner.db, "chats", dmC), { type: "private", members: [uidOwner, uidMember].sort(), createdAt: Date.now(), lastRead: {}, unread: {}, pinnedBy: [], muted: [] });
+await setDoc(doc(owner.db, "users", uidOwner, "private", "prefs"), { dmClosed: true, dmAllow: [uidAdmin] }, { merge: true });
+await expectDenied("closed DM blocks stranger", () =>
+  setDoc(doc(collection(member.db, "chats", dmC, "messages")), {
+    sender: uidMember, senderName: "fmember", createdAt: Date.now(), reactions: {}, topicId: "general", text: "спам" }));
+await setDoc(doc(collection(admin.db, "chats", dmId, "messages")), {
+  sender: uidAdmin, senderName: "fadmin", createdAt: Date.now(), reactions: {}, topicId: "general", text: "мне можно" });
+check("closed DM allows dmAllow peer", true);
+await setDoc(doc(owner.db, "users", uidOwner, "private", "prefs"), { dmClosed: false }, { merge: true });
+
+// Чужие приватные настройки недоступны никому, кроме владельца
+await expectDenied("foreign prefs unreadable", () => getDoc(doc(admin.db, "users", uidOwner, "private", "prefs")));
+
+// Сессии: свои — можно, чужие — нет
+await setDoc(doc(owner.db, "users", uidOwner, "sessions", "sess1"),
+  { platform: "web", label: "Linux · Firefox", createdAt: Date.now(), lastSeen: Date.now() });
+check("own session write allowed", true);
+await expectDenied("foreign session write denied", () =>
+  setDoc(doc(admin.db, "users", uidOwner, "sessions", "hack"), { platform: "web", createdAt: Date.now() }));
+await expectDenied("foreign session read denied", () => getDoc(doc(admin.db, "users", uidOwner, "sessions", "sess1")));
+
+// Журнал безопасности: дописывается, но не переписывается задним числом
+await setDoc(doc(owner.db, "users", uidOwner, "seclog", "e1"), { type: "login", at: Date.now(), platform: "web" });
+check("seclog append allowed", true);
+await expectDenied("seclog rewrite denied", () =>
+  updateDoc(doc(owner.db, "users", uidOwner, "seclog", "e1"), { type: "nothing" }));
+await expectDenied("seclog backdating denied", () =>
+  setDoc(doc(owner.db, "users", uidOwner, "seclog", "e2"), { type: "login", at: Date.now() + 3600000 }));
+await expectDenied("foreign seclog write denied", () =>
+  setDoc(doc(admin.db, "users", uidOwner, "seclog", "e3"), { type: "login", at: Date.now() }));
+
 console.log(results.join("\n"));
 console.log(results.some(r => r.startsWith("FAIL")) ? "\n=== ЕСТЬ ОШИБКИ ===" : "\n=== ВСЕ ТЕСТЫ ПРОШЛИ ===");
 process.exit(0);

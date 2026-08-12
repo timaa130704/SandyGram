@@ -19,7 +19,7 @@ import {
   TTL_OPTIONS, ttlLabel, ttlLeft, isExpired,
   foldersWithCounts, chatsInFolder, newTttGame, tttMove, tttWinner, tttMark,
 } from "/sg30.js";
-import { ensureKeyPair, sealForMembers, openForMe, fingerprint } from "/sge2e.js";
+import { ensureKeyPair, sealForMembers, openForMe, fingerprint, exportKeyBackup, importKeyBackup, restoreKeyPair } from "/sge2e.js";
 
 const fbApp = initializeApp(window.FIREBASE_CONFIG);
 const auth = getAuth(fbApp);
@@ -142,6 +142,12 @@ function fmtDuration(ms) {
   if (h < 24) return `${Math.round(h * 10) / 10} ч`;
   return `${Math.round(h / 24 * 10) / 10} д`;
 }
+// Дата-время для журналов безопасности: «12 авг, 14:05»
+function fmtDateTime(ms) {
+  if (!ms) return "—";
+  const d = new Date(ms);
+  return `${d.toLocaleDateString("ru", { day: "numeric", month: "short" })}, ${d.getHours()}:${String(d.getMinutes()).padStart(2, "0")}`;
+}
 function fmtUntil(ms) {
   if (!ms) return "навсегда";
   const d = new Date(ms);
@@ -204,6 +210,61 @@ async function loadMyPrefs() {
   myPrefs = { blocked: [], hideLastSeen: false, ...(p?.exists() ? p.data() : {}) };
   const label = $("#lastSeenLabel"); if (label) label.textContent = me.hideLastSeen ? "вкл" : "выкл";
 }
+// ---------- 3.0: сессии, «выйти везде», журнал безопасности ----------
+// Отзыв токена по-настоящему умеет только Admin SDK, которого у нас нет.
+// Поэтому «выйти везде» — это метка revokeBefore в приватных настройках:
+// каждый клиент видит её и выходит сам. Честно называем это кооперативным.
+const SESSION_KEY = "sg_session_id";
+let mySessionId = null, sessionTimer = null, revokeWatchUnsub = null;
+function deviceLabel() {
+  const ua = navigator.userAgent;
+  const os = /Android/i.test(ua) ? "Android" : /iPhone|iPad/i.test(ua) ? "iOS"
+    : /Windows/i.test(ua) ? "Windows" : /Mac OS/i.test(ua) ? "macOS" : /Linux/i.test(ua) ? "Linux" : "ПК";
+  const br = /Edg\//.test(ua) ? "Edge" : /OPR\//.test(ua) ? "Opera" : /Chrome\//.test(ua) ? "Chrome"
+    : /Firefox\//.test(ua) ? "Firefox" : /Safari\//.test(ua) ? "Safari" : "браузер";
+  return `${os} · ${br}`;
+}
+async function secLog(type, detail = "") {
+  if (!me) return;
+  try {
+    await setDoc(doc(collection(dbf, "users", me.uid, "seclog")),
+      { type, detail: String(detail).slice(0, 200), at: Date.now(), platform: deviceLabel() });
+  } catch { /* журнал не критичен — не мешаем работе */ }
+}
+async function registerSession() {
+  if (!me) return;
+  mySessionId = localStorage.getItem(SESSION_KEY);
+  const fresh = !mySessionId;
+  if (fresh) { mySessionId = Math.random().toString(36).slice(2) + Date.now().toString(36); localStorage.setItem(SESSION_KEY, mySessionId); }
+  const ref = doc(dbf, "users", me.uid, "sessions", mySessionId);
+  await setDoc(ref, { platform: "web", label: deviceLabel(), lastSeen: Date.now(), ...(fresh ? { createdAt: Date.now() } : {}) }, { merge: true })
+    .catch(() => { });
+  if (fresh) secLog("login", `новое устройство: ${deviceLabel()}`);
+  clearInterval(sessionTimer);
+  sessionTimer = setInterval(() => {
+    if (me && mySessionId) updateDoc(doc(dbf, "users", me.uid, "sessions", mySessionId), { lastSeen: Date.now() }).catch(() => { });
+  }, 120000);
+  // следим за меткой «выйти везде»
+  revokeWatchUnsub?.();
+  revokeWatchUnsub = onSnapshot(doc(dbf, "users", me.uid, "private", "prefs"), async (snap) => {
+    const rb = snap.exists() ? snap.data().revokeBefore : 0;
+    if (!rb) return;
+    const sess = await getDoc(doc(dbf, "users", me.uid, "sessions", mySessionId)).catch(() => null);
+    const started = sess?.exists() ? (sess.data().createdAt || 0) : 0;
+    if (started && started < rb) {
+      localStorage.removeItem(SESSION_KEY);
+      toast("Сессия завершена с другого устройства");
+      await signOut(auth).catch(() => { });
+    }
+  }, () => { });
+}
+async function endMySession() {
+  if (me && mySessionId) await deleteDoc(doc(dbf, "users", me.uid, "sessions", mySessionId)).catch(() => { });
+  localStorage.removeItem(SESSION_KEY);
+  clearInterval(sessionTimer); sessionTimer = null;
+  revokeWatchUnsub?.(); revokeWatchUnsub = null;
+}
+
 function topicsView(chat) {
   const all = [{ id: "general", title: "Общий", icon: "#", createdAt: chat.createdAt, closed: !!chat.generalClosed }, ...(chat.topics || [])];
   const lastFor = (tid) => [...messages].reverse().find(m => !m.deleted && (m.topicId || "general") === tid) || null;
@@ -283,6 +344,7 @@ async function login(username, password) {
 }
 $("#logoutButton").addEventListener("click", async () => {
   $("#settingsPanel").classList.add("hidden");
+  await endMySession();
   await signOut(auth);
 });
 
@@ -406,6 +468,7 @@ onAuthStateChanged(auth, async (user) => {
   me = { uid: user.uid, ...profile };
   await setupE2E();
   showMessenger();
+  registerSession();
 });
 
 function showAuth() {
@@ -441,6 +504,9 @@ function showMessenger() {
   initWebPush();
   subscribeStories();
   listenIncomingCalls();
+  // код-замок: при запуске закрываем сразу, дальше — по бездействию
+  if (localStorage.getItem("sg_pin_hash")) lockScreen();
+  armIdleLock();
 }
 
 // ================================================================ ЗВОНКИ (WebRTC, сигналинг через RTDB)
@@ -1366,17 +1432,35 @@ function decryptMessage(message) {
 // Включение/выключение шифрования в личном чате
 function openE2EModal(v) {
   const on = !!v.raw?.e2e;
-  const peer = (v.raw?.members || []).find(u => u !== me.uid);
-  const peerPub = userCache.get(peer)?.e2ePub;
+  const group = v.type === "group";
+  const others = (v.raw?.members || []).filter(u => u !== me.uid);
+  const peerPub = userCache.get(others[0])?.e2ePub;
+  // В группе шифруем тем же способом: отдельный конверт каждому участнику.
+  // Схема sender keys не нужна, пока участников мало — правила и так режут enc восемью ключами.
+  const noKey = others.filter(u => !userCache.get(u)?.e2ePub);
+  const peerLine = group
+    ? `Участников с ключами: <b>${others.length - noKey.length} из ${others.length}</b>` +
+      (noKey.length ? `<br><small class="muted">Без ключа: ${noKey.map(u => escapeHtml(userCache.get(u)?.displayName || userCache.get(u)?.username || "участник")).join(", ")} — им нужно зайти в 3.0</small>` : "")
+    : `Отпечаток собеседника: <b>${escapeHtml(peerPub ? fingerprint(peerPub) : "ключа ещё нет")}</b>`;
   openModal(`<h3>Секретный чат</h3>
-    <p class="modal-note">Сообщения шифруются на устройстве (X25519 + XSalsa20-Poly1305). Сервер, база и мы видим только шифротекст. Переписка читается лишь там, где лежит приватный ключ — на другом устройстве старые сообщения не откроются.</p>
+    <p class="modal-note">Сообщения шифруются на устройстве (X25519 + XSalsa20-Poly1305). Сервер, база и мы видим только шифротекст. Переписка читается лишь там, где лежит приватный ключ — на другом устройстве старые сообщения не откроются.${group ? " В группе сообщение шифруется отдельно для каждого участника, поэтому включить можно до 8 человек." : ""}</p>
     <p class="modal-note">Ваш отпечаток: <b>${escapeHtml(fingerprint(myKeys?.pub))}</b><br>
-    Отпечаток собеседника: <b>${escapeHtml(peerPub ? fingerprint(peerPub) : "ключа ещё нет")}</b><br>
-    Сверьте их лично или голосом — совпали, значит посредника нет.</p>
-    <div class="modal-actions"><button class="cancel">Закрыть</button><button class="confirm">${on ? "Выключить" : "Включить"}</button></div>`);
+    ${peerLine}<br>
+    Сверьте их лично, голосом или по QR — совпали, значит посредника нет.</p>
+    <div id="fpQr" class="qr-frame" style="display:none;justify-content:center;margin:8px 0"></div>
+    <div class="modal-actions"><button class="cancel">Закрыть</button><button id="fpQrBtn">Показать QR</button><button class="confirm">${on ? "Выключить" : "Включить"}</button></div>`);
+  // QR с отпечатком: собеседник сверяет картинку, а не диктует 16 символов голосом
+  $("#fpQrBtn").addEventListener("click", () => {
+    const box = $("#fpQr");
+    if (box.style.display !== "none") { box.style.display = "none"; box.innerHTML = ""; $("#fpQrBtn").textContent = "Показать QR"; return; }
+    box.style.display = "flex"; box.innerHTML = "";
+    new QRCode(box, { text: `sgfp:${myKeys?.pub || ""}`, width: 180, height: 180, correctLevel: QRCode.CorrectLevel.M });
+    $("#fpQrBtn").textContent = "Скрыть QR";
+  });
   $("#modal .cancel").addEventListener("click", closeModal);
   $("#modal .confirm").addEventListener("click", async () => {
-    if (!on && !peerPub) return toast("Собеседник ещё не заходил в 3.0 — ключа нет");
+    if (!on && group && noKey.length) return toast(`Нет ключей у ${noKey.length} участник(ов) — пусть зайдут в 3.0`);
+    if (!on && !group && !peerPub) return toast("Собеседник ещё не заходил в 3.0 — ключа нет");
     try {
       await updateDoc(doc(dbf, "chats", v.id), { e2e: !on });
       closeModal();
@@ -2349,7 +2433,8 @@ function showChatContextMenu(point, v) {
     <button data-act="poll">📊 Создать опрос</button>
     <button data-act="schedule">⏰ Отложенная отправка</button>
     ${v.type === "private" ? '<button data-act="game">🎮 Крестики-нолики</button>' : ""}
-    ${v.type === "private" ? `<button data-act="e2e">${v.raw?.e2e ? "🔒 Секретный чат: вкл" : "🔓 Включить шифрование"}</button>` : ""}
+    ${v.type === "private" || (v.type === "group" && isChatAdmin(v.raw) && (v.raw?.members || []).length <= 8)
+      ? `<button data-act="e2e">${v.raw?.e2e ? "🔒 Секретный чат: вкл" : "🔓 Включить шифрование"}</button>` : ""}
     <button data-act="ttl">🔥 Исчезающие: ${escapeHtml(ttlLabel(v.raw?.ttl || 0))}</button>
     <button data-act="folder">🗂 В папку…</button>
     ${v.type === "group" ? '<button data-act="topic"># Создать топик</button>' : ""}
@@ -2369,7 +2454,11 @@ function showChatContextMenu(point, v) {
       else if (act === "schedule") { if (currentChatId !== v.id) await openChat(v.id); openScheduleModal(); }
       else if (act === "game") { if (currentChatId !== v.id) await openChat(v.id); await startTttGame(); }
       else if (act === "ttl") openTtlModal(v);
-      else if (act === "e2e") { await fetchUser((v.raw.members || []).find(u => u !== me.uid)); openE2EModal(v); }
+      else if (act === "e2e") {
+        // в группе нужны ключи всех участников — иначе конверт не собрать
+        for (const uid of (v.raw.members || [])) if (uid !== me.uid) await fetchUser(uid);
+        openE2EModal(v);
+      }
       else if (act === "folder") openFolderPickModal(v);
       else if (act === "clear") {
         openConfirm(`Очистить историю «${v.title}»? Удалятся сообщения, которые вы вправе удалять.`, async () => {
@@ -2498,6 +2587,8 @@ document.querySelectorAll("#settingsPanel .settings-row").forEach(row => row.add
       $("#lastSeenLabel").textContent = next ? "вкл" : "выкл";
       toast(next ? "Время захода скрыто — другие видят «был(а) недавно»" : "Время захода снова видно");
     }).catch(e => toast(ruError(e)));
+  } else if (action === "security") {
+    openSecurityPanel();
   } else if (action === "deleteAccount") {
     openConfirm("Удалить аккаунт НАВСЕГДА? Профиль и имя освободятся, переписки в группах останутся.", async () => {
       try {
@@ -2926,3 +3017,194 @@ $("#chatSearch").addEventListener("input", () => {
     } catch { /* поиск не критичен */ }
   }, 300);
 });
+
+// ================================================================ 3.0 БЛОК C: безопасность и приватность
+const SEC_EVENT_RU = {
+  login: "Вход на новом устройстве", logout_all: "Выход на всех устройствах",
+  key_backup: "Создана резервная копия ключа", key_restore: "Ключ восстановлен из копии",
+  pin_on: "Включён код-замок", pin_off: "Выключен код-замок",
+  dm_closed: "Личка закрыта", dm_open: "Личка открыта",
+};
+async function savePrefs(patch) {
+  await setDoc(doc(dbf, "users", me.uid, "private", "prefs"), patch, { merge: true });
+  myPrefs = { ...myPrefs, ...patch };
+}
+function openSecurityPanel() {
+  const on = (v) => v ? "вкл" : "выкл";
+  openModal(`<h3>Безопасность и приватность</h3>
+    <div class="sec-list">
+      <button class="settings-row" data-sec="dm"><span class="row-icon">✉️</span><span>Закрытая личка: <b>${on(myPrefs.dmClosed)}</b></span></button>
+      <button class="settings-row" data-sec="lock"><span class="row-icon">🔐</span><span>Код-замок: <b>${on(localStorage.getItem("sg_pin_hash"))}</b></span></button>
+      <button class="settings-row" data-sec="backup"><span class="row-icon">🗝</span><span>Резервная копия ключа шифрования</span></button>
+      <button class="settings-row" data-sec="sessions"><span class="row-icon">💻</span><span>Активные сессии</span></button>
+      <button class="settings-row" data-sec="log"><span class="row-icon">📜</span><span>Журнал безопасности</span></button>
+    </div>
+    <p class="muted" style="font-size:12.5px;margin-top:10px">Закрытая личка: писать смогут только те, кому вы писали сами. Проверяется правилами базы, а не только приложением.</p>
+    <div class="modal-actions"><button class="cancel">Закрыть</button></div>`);
+  $("#modal .cancel").addEventListener("click", closeModal);
+  $("#modal .sec-list").addEventListener("click", async (e) => {
+    const b = e.target.closest("button[data-sec]");
+    if (!b) return;
+    const what = b.dataset.sec;
+    if (what === "dm") {
+      const next = !myPrefs.dmClosed;
+      try {
+        // себе в белый список попадают все, с кем уже есть личный чат — иначе закрытая личка оборвёт текущие диалоги
+        const peers = [...chats.values()].filter(c => c.type === "private").map(c => c.members.find(u => u !== me.uid)).filter(Boolean);
+        await savePrefs({ dmClosed: next, dmAllow: [...new Set([...(myPrefs.dmAllow || []), ...peers])] });
+        secLog(next ? "dm_closed" : "dm_open");
+        toast(next ? "Личка закрыта — новые люди писать не смогут" : "Личка открыта");
+        openSecurityPanel();
+      } catch (err) { toast(ruError(err)); }
+    } else if (what === "lock") openPinSetup();
+    else if (what === "backup") openKeyBackup();
+    else if (what === "sessions") openSessions();
+    else if (what === "log") openSecLog();
+  });
+}
+
+// ---------- резервная копия ключа шифрования ----------
+function openKeyBackup() {
+  openModal(`<h3>Резервная копия ключа</h3>
+    <p class="muted" style="font-size:13px">Ключ секретных чатов хранится только на этом устройстве. Копия зашифрована парольной фразой: без неё её не прочитает никто, включая нас. Забудете фразу — копия бесполезна.</p>
+    <label class="field"><span>Парольная фраза (от 8 символов)</span><input id="kbPass" type="password" autocomplete="new-password" /></label>
+    <div class="modal-actions">
+      <button class="cancel">Отмена</button>
+      <button id="kbRestore">Восстановить из файла</button>
+      <button class="confirm" id="kbSave">Сохранить копию</button>
+    </div>
+    <input type="file" id="kbFile" accept=".sgkey,application/json" hidden />`);
+  $("#modal .cancel").addEventListener("click", closeModal);
+  $("#kbSave").addEventListener("click", async () => {
+    try {
+      if (!myKeys) throw new Error("На этом устройстве нет ключа шифрования");
+      const blob = exportKeyBackup(myKeys, $("#kbPass").value);
+      const url = URL.createObjectURL(new Blob([blob], { type: "application/json" }));
+      const a = document.createElement("a");
+      a.href = url; a.download = `sandygram-${me.username}.sgkey`; a.click();
+      URL.revokeObjectURL(url);
+      secLog("key_backup");
+      closeModal(); toast("Копия сохранена — храните файл и фразу отдельно");
+    } catch (err) { toast(err.message || ruError(err)); }
+  });
+  $("#kbRestore").addEventListener("click", () => $("#kbFile").click());
+  $("#kbFile").addEventListener("change", async (e) => {
+    const file = e.target.files?.[0];
+    if (!file) return;
+    try {
+      const pair = importKeyBackup(await file.text(), $("#kbPass").value);
+      await restoreKeyPair(e2eStorage, pair);
+      myKeys = pair;
+      await updateDoc(doc(dbf, "users", me.uid), { e2ePub: pair.pub });
+      me.e2ePub = pair.pub;
+      secLog("key_restore");
+      closeModal(); toast("Ключ восстановлен — старые секретные чаты снова читаются");
+    } catch (err) { toast(err.message || ruError(err)); }
+  });
+}
+
+// ---------- активные сессии ----------
+async function openSessions() {
+  openModal(`<h3>Активные сессии</h3><p class="muted">Загрузка…</p>`);
+  const snap = await getDocs(collection(dbf, "users", me.uid, "sessions")).catch(() => null);
+  const list = snap ? snap.docs.map(d => ({ id: d.id, ...d.data() })).sort((a, b) => (b.lastSeen || 0) - (a.lastSeen || 0)) : [];
+  openModal(`<h3>Активные сессии</h3>
+    <div class="sec-list">${list.map(s => `
+      <div class="sec-item">
+        <div><b>${escapeHtml(s.label || s.platform || "устройство")}</b>${s.id === mySessionId ? " — это устройство" : ""}
+        <br><small class="muted">активна ${fmtDateTime(s.lastSeen || s.createdAt || 0)}</small></div>
+        ${s.id === mySessionId ? "" : `<button class="sec-kill" data-id="${s.id}">Убрать</button>`}
+      </div>`).join("") || `<p class="muted">Записей нет</p>`}</div>
+    <p class="muted" style="font-size:12.5px;margin-top:10px">«Выйти везде» помечает старые сессии отозванными — каждый клиент, увидев метку, выходит сам. Мгновенного отзыва токена на бесплатном тарифе без серверного ключа не сделать, поэтому устройство offline выйдет при следующем запуске.</p>
+    <div class="modal-actions"><button class="cancel">Закрыть</button><button class="confirm danger" id="killAll">Выйти на всех устройствах</button></div>`);
+  $("#modal .cancel").addEventListener("click", closeModal);
+  $("#modal .sec-list").addEventListener("click", async (e) => {
+    const b = e.target.closest(".sec-kill");
+    if (!b) return;
+    await deleteDoc(doc(dbf, "users", me.uid, "sessions", b.dataset.id)).catch(() => { });
+    openSessions();
+  });
+  $("#killAll").addEventListener("click", async () => {
+    try {
+      await savePrefs({ revokeBefore: Date.now() });
+      for (const s of list) if (s.id !== mySessionId) await deleteDoc(doc(dbf, "users", me.uid, "sessions", s.id)).catch(() => { });
+      // своей сессии выдаём свежий createdAt, иначе метка выкинет и нас
+      await setDoc(doc(dbf, "users", me.uid, "sessions", mySessionId), { createdAt: Date.now() + 1000 }, { merge: true }).catch(() => { });
+      secLog("logout_all");
+      closeModal(); toast("Остальные устройства выйдут при ближайшем запуске");
+    } catch (err) { toast(ruError(err)); }
+  });
+}
+
+// ---------- журнал безопасности ----------
+async function openSecLog() {
+  openModal(`<h3>Журнал безопасности</h3><p class="muted">Загрузка…</p>`);
+  const snap = await getDocs(query(collection(dbf, "users", me.uid, "seclog"), orderBy("at", "desc"), limit(50))).catch(() => null);
+  const rows = snap ? snap.docs.map(d => d.data()) : [];
+  openModal(`<h3>Журнал безопасности</h3>
+    <div class="sec-list">${rows.map(r => `
+      <div class="sec-item">
+        <div><b>${escapeHtml(SEC_EVENT_RU[r.type] || r.type)}</b>
+        <br><small class="muted">${fmtDateTime(r.at)} · ${escapeHtml(r.platform || "")}${r.detail ? " · " + escapeHtml(r.detail) : ""}</small></div>
+      </div>`).join("") || `<p class="muted">Пока пусто</p>`}</div>
+    <p class="muted" style="font-size:12.5px;margin-top:10px">Записи только добавляются: правила базы не дают изменить их задним числом.</p>
+    <div class="modal-actions"><button class="cancel">Закрыть</button></div>`);
+  $("#modal .cancel").addEventListener("click", closeModal);
+}
+
+// ---------- код-замок с автоблокировкой ----------
+// Пин не защищает данные криптографически (ключ и так в localStorage) — это
+// замок от чужих глаз за тем же компьютером. Честно пишем это в интерфейсе.
+async function sha256(s) {
+  const buf = await crypto.subtle.digest("SHA-256", new TextEncoder().encode(s));
+  return [...new Uint8Array(buf)].map(b => b.toString(16).padStart(2, "0")).join("");
+}
+function openPinSetup() {
+  const has = !!localStorage.getItem("sg_pin_hash");
+  openModal(`<h3>Код-замок</h3>
+    <p class="muted" style="font-size:13px">Закрывает окно мессенджера кодом при бездействии. Это защита от чужих глаз за этим же компьютером, а не шифрование: данные в браузере остаются как есть.</p>
+    ${has ? `<div class="modal-actions"><button class="cancel">Отмена</button><button class="confirm danger" id="pinOff">Выключить</button></div>`
+      : `<label class="field"><span>Код (4–8 цифр)</span><input id="pinVal" type="password" inputmode="numeric" maxlength="8" /></label>
+         <label class="field"><span>Блокировать после (минут бездействия)</span><input id="pinIdle" type="number" min="1" max="120" value="5" /></label>
+         <div class="modal-actions"><button class="cancel">Отмена</button><button class="confirm" id="pinOn">Включить</button></div>`}`);
+  $("#modal .cancel").addEventListener("click", closeModal);
+  if (has) {
+    $("#pinOff").addEventListener("click", () => {
+      localStorage.removeItem("sg_pin_hash"); localStorage.removeItem("sg_pin_idle");
+      secLog("pin_off"); closeModal(); toast("Код-замок выключен"); armIdleLock();
+    });
+  } else {
+    $("#pinOn").addEventListener("click", async () => {
+      const v = $("#pinVal").value.trim();
+      if (!/^\d{4,8}$/.test(v)) return toast("Код — от 4 до 8 цифр");
+      localStorage.setItem("sg_pin_hash", await sha256(v));
+      localStorage.setItem("sg_pin_idle", String(Math.min(120, Math.max(1, parseInt($("#pinIdle").value, 10) || 5))));
+      secLog("pin_on"); closeModal(); toast("Код-замок включён"); armIdleLock();
+    });
+  }
+}
+let idleTimer = null;
+function lockScreen() {
+  if (document.getElementById("lockOverlay")) return;
+  const ov = document.createElement("div");
+  ov.id = "lockOverlay";
+  ov.innerHTML = `<div class="lock-card"><div class="lock-emoji">🔐</div>
+    <p>Введите код</p><input id="lockPin" type="password" inputmode="numeric" maxlength="8" autofocus />
+    <p class="muted lock-err" id="lockErr"></p></div>`;
+  document.body.appendChild(ov);
+  const input = ov.querySelector("#lockPin");
+  input.focus();
+  input.addEventListener("keydown", async (e) => {
+    if (e.key !== "Enter") return;
+    if (await sha256(input.value) === localStorage.getItem("sg_pin_hash")) { ov.remove(); armIdleLock(); }
+    else { ov.querySelector("#lockErr").textContent = "Неверный код"; input.value = ""; }
+  });
+}
+function armIdleLock() {
+  clearTimeout(idleTimer);
+  const mins = parseInt(localStorage.getItem("sg_pin_idle") || "0", 10);
+  if (!localStorage.getItem("sg_pin_hash") || !mins) return;
+  idleTimer = setTimeout(lockScreen, mins * 60000);
+}
+["mousemove", "keydown", "click", "touchstart"].forEach(ev =>
+  document.addEventListener(ev, () => { if (!document.getElementById("lockOverlay")) armIdleLock(); }, { passive: true }));

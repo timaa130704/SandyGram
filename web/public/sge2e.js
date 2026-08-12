@@ -81,3 +81,48 @@ export function fingerprint(pubB64) {
   const h = nacl.hash(b64.dec(pubB64)).slice(0, 8);
   return [...h].map(x => x.toString(16).padStart(2, "0")).join("").toUpperCase().replace(/(.{4})/g, "$1 ").trim();
 }
+
+// ---------- резервная копия ключа парольной фразой (3.0) ----------
+// Зачем: без неё новое устройство навсегда теряет старую секретную переписку.
+// KDF намеренно собран на одном лишь nacl.hash (SHA-512), потому что PBKDF2 из
+// WebCrypto нет в React Native, а тянуть вторую криптобиблиотеку ради этого — хуже.
+// 200 000 итераций с подмешиванием соли и счётчика: перебор словарной фразы
+// становится дорогим, но фразу всё равно надо выбирать длинную.
+const KDF_ROUNDS = 200000;
+function deriveKey(passphrase, saltU8) {
+  let h = nacl.hash(new Uint8Array([...utf8.enc(String(passphrase)), ...saltU8]));
+  for (let i = 0; i < KDF_ROUNDS; i++) {
+    const ctr = new Uint8Array([i & 255, (i >> 8) & 255, (i >> 16) & 255, (i >> 24) & 255]);
+    h = nacl.hash(new Uint8Array([...h, ...saltU8, ...ctr]));
+  }
+  return h.slice(0, nacl.secretbox.keyLength);
+}
+
+// Возвращает строку-конверт: её можно сохранить в файл или в свой приватный документ.
+export function exportKeyBackup(pair, passphrase) {
+  if (!pair?.secret) throw new Error("Нет ключа для резервной копии");
+  if (String(passphrase).length < 8) throw new Error("Парольная фраза — минимум 8 символов");
+  const salt = nacl.randomBytes(16);
+  const nonce = nacl.randomBytes(nacl.secretbox.nonceLength);
+  const box = nacl.secretbox(utf8.enc(JSON.stringify(pair)), nonce, deriveKey(passphrase, salt));
+  return JSON.stringify({ v: 1, s: b64.enc(salt), n: b64.enc(nonce), c: b64.enc(box) });
+}
+
+// Возвращает { pub, secret } или бросает — фразу подобрать по конверту нельзя.
+export function importKeyBackup(blob, passphrase) {
+  let o;
+  try { o = typeof blob === "string" ? JSON.parse(blob) : blob; }
+  catch { throw new Error("Это не резервная копия ключа"); }
+  if (!o || o.v !== 1 || !o.s || !o.n || !o.c) throw new Error("Это не резервная копия ключа");
+  const open = nacl.secretbox.open(b64.dec(o.c), b64.dec(o.n), deriveKey(passphrase, b64.dec(o.s)));
+  if (!open) throw new Error("Неверная парольная фраза");
+  const pair = JSON.parse(utf8.dec(open));
+  if (!pair.pub || !pair.secret) throw new Error("Копия повреждена");
+  return pair;
+}
+
+// Записать восстановленную пару как ключ этого устройства
+export async function restoreKeyPair(storage, pair) {
+  await storage.set(E2E_KEY_STORE, JSON.stringify({ pub: pair.pub, secret: pair.secret }));
+  return pair;
+}

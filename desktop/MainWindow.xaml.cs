@@ -23,6 +23,9 @@ public partial class MainWindow : Window
     static readonly string[] AvatarTones = { "#F3EDFF", "#E8DDFD", "#DCCFFB", "#CFC0F8", "#C2B1F4", "#B5A2F0", "#A893EC" };
     static readonly string SessionFile = Path.Combine(
         Environment.GetFolderPath(Environment.SpecialFolder.ApplicationData), "SandyGram", "session.json");
+    static readonly string SessionIdFile = Path.Combine(
+        Environment.GetFolderPath(Environment.SpecialFolder.ApplicationData), "SandyGram", "session-id.txt");
+    string mySessionId = "";
 
     string myUsername = "", myDisplayName = "";
     readonly Dictionary<string, JsonNode> chats = new();          // chatId -> fields
@@ -247,6 +250,9 @@ void QrBtn_Click(object sender, RoutedEventArgs e)
         MainPanel.Visibility = Visibility.Visible;
 
         // Realtime через сигнальную шину RTDB (одно живое соединение, чтения Firestore — только по факту событий)
+        await RegisterSessionAsync();
+        if (await SessionRevokedAsync()) { MessageBox.Show("Сессия завершена с другого устройства.", "SandyGram"); LogoutBtn_Click(this, new RoutedEventArgs()); return; }
+
         StartBumpListener();
         chatsTimer = StartTimer(90, async () => { if (IsActive) await PollChatsAsync(); }); // редкая страховка
         presenceTimer = StartTimer(45, async () => { if (IsActive) await HeartbeatAsync(); });
@@ -491,6 +497,157 @@ void QrBtn_Click(object sender, RoutedEventArgs e)
         searchFilter = SearchBox.Text.Trim().ToLowerInvariant();
         lastListSignature = "";
         _ = RenderChatListAsync();
+    }
+
+    // ---------- 3.0 блок C: сессии, журнал безопасности ----------
+    // Мгновенный отзыв токена умеет только Admin SDK, которого у нас нет.
+    // Поэтому «выйти везде» — метка revokeBefore в private/prefs: каждый клиент,
+    // увидев её при запуске, выходит сам. Называем вещи своими именами в UI.
+    async Task RegisterSessionAsync()
+    {
+        try
+        {
+            bool fresh = !File.Exists(SessionIdFile);
+            if (fresh)
+            {
+                mySessionId = Guid.NewGuid().ToString("N")[..16];
+                Directory.CreateDirectory(Path.GetDirectoryName(SessionIdFile)!);
+                File.WriteAllText(SessionIdFile, mySessionId);
+            }
+            else mySessionId = File.ReadAllText(SessionIdFile).Trim();
+
+            var now = DateTimeOffset.UtcNow.ToUnixTimeMilliseconds();
+            var fields = new Dictionary<string, object?> { ["platform"] = "desktop", ["label"] = "Приложение Windows", ["lastSeen"] = now };
+            if (fresh) fields["createdAt"] = now;
+            await Fire.PatchDocAsync($"users/{Fire.Uid}/sessions/{mySessionId}", fields);
+            if (fresh) await SecLogAsync("login", "новое устройство: Windows");
+        }
+        catch { /* сессии не критичны для работы мессенджера */ }
+    }
+
+    async Task SecLogAsync(string type, string detail = "")
+    {
+        try
+        {
+            await Fire.SetDocAsync($"users/{Fire.Uid}/seclog/{Guid.NewGuid():N}", new Dictionary<string, object?>
+            {
+                ["type"] = type,
+                ["detail"] = detail.Length > 200 ? detail[..200] : detail,
+                ["at"] = DateTimeOffset.UtcNow.ToUnixTimeMilliseconds(),
+                ["platform"] = "Windows",
+            });
+        }
+        catch { }
+    }
+
+    async Task<bool> SessionRevokedAsync()
+    {
+        try
+        {
+            var prefs = await Fire.GetDocAsync($"users/{Fire.Uid}/private/prefs");
+            var revoke = prefs?["fields"] == null ? 0 : Fire.FLong(prefs["fields"]!, "revokeBefore");
+            if (revoke <= 0) return false;
+            var mine = await Fire.GetDocAsync($"users/{Fire.Uid}/sessions/{mySessionId}");
+            var born = mine?["fields"] == null ? 0 : Fire.FLong(mine["fields"]!, "createdAt");
+            if (born > 0 && born < revoke) { try { File.Delete(SessionIdFile); } catch { } return true; }
+        }
+        catch { }
+        return false;
+    }
+
+    async void SecurityBtn_Click(object sender, RoutedEventArgs e)
+    {
+        var panel = new StackPanel { Margin = new Thickness(18) };
+        panel.Children.Add(new TextBlock { Text = "Активные сессии", FontWeight = FontWeights.Bold, FontSize = 15, Margin = new Thickness(0, 0, 0, 8) });
+        var list = new StackPanel();
+        panel.Children.Add(list);
+        panel.Children.Add(new TextBlock
+        {
+            Text = "«Выйти везде» помечает старые сессии отозванными — устройство выйдет при следующем запуске. " +
+                   "Мгновенный отзыв требует серверного ключа, которого у нас нет.",
+            TextWrapping = TextWrapping.Wrap, FontSize = 11.5, Opacity = 0.7, Margin = new Thickness(0, 8, 0, 8),
+        });
+        var kill = new Button { Content = "Выйти на всех устройствах", Padding = new Thickness(12, 7, 12, 7), HorizontalAlignment = HorizontalAlignment.Left };
+        panel.Children.Add(kill);
+        panel.Children.Add(new TextBlock { Text = "Журнал безопасности", FontWeight = FontWeights.Bold, FontSize = 15, Margin = new Thickness(0, 16, 0, 8) });
+        var log = new StackPanel();
+        panel.Children.Add(log);
+
+        var win = new Window
+        {
+            Title = "Безопасность", Width = 460, Height = 560, Owner = this,
+            WindowStartupLocation = WindowStartupLocation.CenterOwner,
+            Content = new ScrollViewer { Content = panel, VerticalScrollBarVisibility = ScrollBarVisibility.Auto },
+        };
+
+        async Task ReloadAsync()
+        {
+            list.Children.Clear(); log.Children.Clear();
+            var sessions = await Fire.RunQueryAsync(new
+            {
+                from = new[] { new { collectionId = "sessions" } },
+                orderBy = new[] { new { field = new { fieldPath = "lastSeen" }, direction = "DESCENDING" } },
+                limit = 20,
+            }, $"users/{Fire.Uid}").ContinueWith(t => t.IsFaulted ? new List<(string, JsonNode)>() : t.Result);
+            foreach (var (id, f) in sessions)
+            {
+                var mine = id == mySessionId;
+                var seen = Fire.FLong(f, "lastSeen");
+                list.Children.Add(new TextBlock
+                {
+                    Text = $"{Fire.FStr(f, "label")}{(mine ? " — это устройство" : "")}\n   активна {DateTimeOffset.FromUnixTimeMilliseconds(seen == 0 ? Fire.FLong(f, "createdAt") : seen).LocalDateTime:d MMM, HH:mm}",
+                    Margin = new Thickness(0, 3, 0, 3), FontSize = 12.5,
+                });
+            }
+            if (list.Children.Count == 0) list.Children.Add(new TextBlock { Text = "Записей нет", Opacity = 0.6, FontSize = 12.5 });
+
+            var events = await Fire.RunQueryAsync(new
+            {
+                from = new[] { new { collectionId = "seclog" } },
+                orderBy = new[] { new { field = new { fieldPath = "at" }, direction = "DESCENDING" } },
+                limit = 50,
+            }, $"users/{Fire.Uid}").ContinueWith(t => t.IsFaulted ? new List<(string, JsonNode)>() : t.Result);
+            foreach (var (_, f) in events)
+            {
+                var type = Fire.FStr(f, "type");
+                var ru = type switch
+                {
+                    "login" => "Вход на новом устройстве",
+                    "logout_all" => "Выход на всех устройствах",
+                    "key_backup" => "Создана резервная копия ключа",
+                    "key_restore" => "Ключ восстановлен из копии",
+                    "dm_closed" => "Личка закрыта",
+                    "dm_open" => "Личка открыта",
+                    _ => type,
+                };
+                log.Children.Add(new TextBlock
+                {
+                    Text = $"{ru}\n   {DateTimeOffset.FromUnixTimeMilliseconds(Fire.FLong(f, "at")).LocalDateTime:d MMM, HH:mm} · {Fire.FStr(f, "platform")}",
+                    Margin = new Thickness(0, 3, 0, 3), FontSize = 12.5,
+                });
+            }
+            if (log.Children.Count == 0) log.Children.Add(new TextBlock { Text = "Пока пусто", Opacity = 0.6, FontSize = 12.5 });
+        }
+
+        kill.Click += async (_, __) =>
+        {
+            kill.IsEnabled = false;
+            try
+            {
+                var now = DateTimeOffset.UtcNow.ToUnixTimeMilliseconds();
+                await Fire.PatchDocAsync($"users/{Fire.Uid}/private/prefs", new Dictionary<string, object?> { ["revokeBefore"] = now });
+                // своей сессии двигаем createdAt вперёд, иначе метка выкинет и нас
+                await Fire.PatchDocAsync($"users/{Fire.Uid}/sessions/{mySessionId}", new Dictionary<string, object?> { ["createdAt"] = now + 1000 });
+                await SecLogAsync("logout_all");
+                MessageBox.Show("Остальные устройства выйдут при следующем запуске.", "SandyGram");
+                await ReloadAsync();
+            }
+            catch (Exception ex) { MessageBox.Show(ex is FireException fe ? fe.Ru : ex.Message, "Ошибка"); }
+            finally { kill.IsEnabled = true; }
+        };
+
+        win.Show();
+        await ReloadAsync();
     }
 
     void LogoutBtn_Click(object sender, RoutedEventArgs e)
