@@ -4,7 +4,9 @@
 const { app, BrowserWindow, shell, Menu, nativeImage } = require("electron");
 const path = require("path");
 
-const APP_URL = "https://sandygram-a3b42.web.app";
+// URL можно переопределить переменной SANDYGRAM_URL — так тестируются
+// preview-каналы хостинга, не пересобирая клиент.
+const APP_URL = process.env.SANDYGRAM_URL || "https://sandygram-a3b42.web.app";
 const APP_ORIGIN = new URL(APP_URL).origin;
 
 // один экземпляр приложения (второй запуск фокусирует существующее окно)
