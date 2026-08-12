@@ -4,3 +4,9 @@ compatibility_date = "2026-08-01"
 
 [triggers]
 crons = ["* * * * *"]
+
+# Медиа 3.0: файлы, видео и HD-фото лежат в R2, а не base64 в документах Firestore.
+# Бакет создаётся один раз: npx wrangler r2 bucket create sandygram-media
+[[r2_buckets]]
+binding = "MEDIA"
+bucket_name = "sandygram-media"

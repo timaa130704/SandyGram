@@ -1,0 +1,39 @@
+{
+  "name": "sandygram",
+  "productName": "SandyGram",
+  "version": "3.0.0",
+  "description": "SandyGram — десктоп-клиент для Linux",
+  "main": "main.js",
+  "author": "SandyGram",
+  "license": "MIT",
+  "scripts": {
+    "start": "electron .",
+    "dist": "electron-builder --linux AppImage"
+  },
+  "devDependencies": {
+    "electron": "^32.2.0",
+    "electron-builder": "^25.1.8"
+  },
+  "build": {
+    "appId": "app.sandygram.desktop",
+    "productName": "SandyGram",
+    "electronDist": "node_modules/electron/dist",
+    "electronVersion": "32.3.3",
+    "files": ["main.js", "build/icon.png"],
+    "directories": { "output": "release" },
+    "linux": {
+      "target": ["AppImage"],
+      "category": "Network",
+      "icon": "build/icon.png",
+      "artifactName": "SandyGram.AppImage",
+      "synopsis": "Мессенджер SandyGram",
+      "desktop": {
+        "entry": {
+          "Name": "SandyGram",
+          "Comment": "Мессенджер SandyGram",
+          "Categories": "Network;InstantMessaging;Chat;"
+        }
+      }
+    }
+  }
+}

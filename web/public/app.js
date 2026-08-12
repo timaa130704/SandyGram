@@ -14,6 +14,13 @@ import {
 import { getMessaging, getToken } from "https://www.gstatic.com/firebasejs/10.14.1/firebase-messaging.js";
 import { getDatabase, ref as dbRef, onValue, onChildAdded, set as dbSet, update as dbUpdate, push as dbPush, remove as dbRemove } from "https://www.gstatic.com/firebasejs/10.14.1/firebase-database.js";
 
+import {
+  uploadMedia, fmtBytes, mediaKind, MEDIA_MAX_BYTES,
+  TTL_OPTIONS, ttlLabel, ttlLeft, isExpired,
+  foldersWithCounts, chatsInFolder, newTttGame, tttMove, tttWinner, tttMark,
+} from "/sg30.js";
+import { ensureKeyPair, sealForMembers, openForMe, fingerprint } from "/sge2e.js";
+
 const fbApp = initializeApp(window.FIREBASE_CONFIG);
 const auth = getAuth(fbApp);
 const dbf = getFirestore(fbApp);
@@ -381,6 +388,7 @@ onAuthStateChanged(auth, async (user) => {
   if (!profile) profile = await promptNewUsername(user);  // новый вход через Google — выбираем имя
   if (!profile) { await signOut(auth); return; }
   me = { uid: user.uid, ...profile };
+  await setupE2E();
   showMessenger();
 });
 
@@ -399,6 +407,9 @@ function teardown() {
   // завершаем звонок и снимаем слушатель входящих — иначе при новом входе он смотрит на старый uid
   if (activeCall) endCall(true);
   incomingListenerUnsub?.(); incomingListenerUnsub = null;
+  foldersUnsub?.(); foldersUnsub = null;
+  myFolders = []; activeFolder = "all";
+  clearInterval(ttlTicker); ttlTicker = null;
   callsListenerStarted = false;
   me = null; chats = new Map(); currentChatId = null; currentTopic = null; messages = [];
 }
@@ -408,6 +419,7 @@ function showMessenger() {
   renderProfile();
   loadMyPrefs();
   subscribeChats();
+  foldersUnsub?.(); foldersUnsub = watchFolders();
   startPresence();
   maybeJoinInvite();
   initWebPush();
@@ -735,6 +747,24 @@ function startPresence() {
   heartbeat();
   clearInterval(heartbeatTimer);
   heartbeatTimer = setInterval(() => { heartbeat(); renderChatList(); renderConversationHeader(); }, 30e3);
+  startTtlTicker();
+}
+
+// Отсчёт исчезающих сообщений: обновляем подписи, а истёкшие убираем из ленты
+let ttlTicker = null;
+function startTtlTicker() {
+  clearInterval(ttlTicker);
+  ttlTicker = setInterval(() => {
+    const badges = document.querySelectorAll(".ttl-badge[data-expires]");
+    if (!badges.length) return;
+    let gone = false;
+    badges.forEach(b => {
+      const exp = Number(b.dataset.expires);
+      if (exp <= Date.now()) gone = true;
+      else b.textContent = `🔥 ${ttlLeft(exp)}`;
+    });
+    if (gone) renderMessagesView();
+  }, 1000);
 }
 document.addEventListener("visibilitychange", () => {
   if (!document.hidden) {
@@ -823,7 +853,7 @@ function renderChatList() {
   if (!me) return;
   const list = $("#chatList");
   if (!list) return;
-  const views = [...chats.values()].map(viewOf)
+  const views = chatsInFolder(myFolders, activeFolder, [...chats.values()].map(viewOf))
     .sort((a, b) => (b.pinned - a.pinned) || ((b.lastMessage?.createdAt || b.raw.createdAt || 0) - (a.lastMessage?.createdAt || a.raw.createdAt || 0)));
   list.replaceChildren();
   for (const v of views) {
@@ -991,7 +1021,9 @@ function subscribeMessages(chatId) {
 let msgSearchQuery = "";
 function visibleMessages() {
   const chat = currentChat();
-  let list = messages.filter(m => !m.deleted);
+  // Просроченные исчезающие и уже просмотренные «одноразовые» прячем сразу,
+  // не дожидаясь уборки push-worker'ом.
+  let list = messages.filter(m => !m.deleted && !isExpired(m));
   if (chat && isForum(chat) && currentTopic) list = list.filter(m => (m.topicId || "general") === currentTopic.id);
   if (msgSearchQuery) list = list.filter(m => (m.text || "").toLowerCase().includes(msgSearchQuery));
   return list;
@@ -1276,6 +1308,209 @@ function openCreatePollModal() {
   });
 }
 
+// ---------- 3.0: секретные чаты (сквозное шифрование) ----------
+// Приватный ключ живёт в localStorage этого браузера и никуда не уходит.
+// Публичный публикуем в users/{uid}.e2ePub, чтобы собеседник мог зашифровать нам.
+let myKeys = null;
+const e2eStorage = {
+  get: (k) => localStorage.getItem(k),
+  set: (k, v) => (v ? localStorage.setItem(k, v) : localStorage.removeItem(k)),
+};
+async function setupE2E() {
+  try {
+    myKeys = await ensureKeyPair(e2eStorage);
+    if (me.e2ePub !== myKeys.pub) {
+      await updateDoc(doc(dbf, "users", me.uid), { e2ePub: myKeys.pub });
+      me.e2ePub = myKeys.pub;
+    }
+  } catch (error) { console.warn("E2E недоступно:", error); myKeys = null; }
+}
+
+// Ключи собеседников: берём из их профилей (кэш пользователей уже есть)
+async function pubKeysFor(chat) {
+  const out = {};
+  for (const uid of chat.members) {
+    if (uid === me.uid) { out[uid] = myKeys?.pub; continue; }
+    const u = await fetchUser(uid);
+    out[uid] = u?.e2ePub || null;
+  }
+  return out;
+}
+
+// Расшифровка «на лету» при отрисовке: не нашли ключ — честно пишем об этом
+function decryptMessage(message) {
+  if (!message.enc) return message.text || "";
+  if (!myKeys) return "🔒 Зашифровано (нет ключа на этом устройстве)";
+  const senderPub = userCache.get(message.sender)?.e2ePub || (message.sender === me.uid ? myKeys.pub : null);
+  if (!senderPub) return "🔒 Зашифровано";
+  const text = openForMe(message, me.uid, senderPub, myKeys.secret);
+  return text === null ? "🔒 Не удалось расшифровать (ключ другого устройства)" : text;
+}
+
+// Включение/выключение шифрования в личном чате
+function openE2EModal(v) {
+  const on = !!v.raw?.e2e;
+  const peer = (v.raw?.members || []).find(u => u !== me.uid);
+  const peerPub = userCache.get(peer)?.e2ePub;
+  openModal(`<h3>Секретный чат</h3>
+    <p class="modal-note">Сообщения шифруются на устройстве (X25519 + XSalsa20-Poly1305). Сервер, база и мы видим только шифротекст. Переписка читается лишь там, где лежит приватный ключ — на другом устройстве старые сообщения не откроются.</p>
+    <p class="modal-note">Ваш отпечаток: <b>${escapeHtml(fingerprint(myKeys?.pub))}</b><br>
+    Отпечаток собеседника: <b>${escapeHtml(peerPub ? fingerprint(peerPub) : "ключа ещё нет")}</b><br>
+    Сверьте их лично или голосом — совпали, значит посредника нет.</p>
+    <div class="modal-actions"><button class="cancel">Закрыть</button><button class="confirm">${on ? "Выключить" : "Включить"}</button></div>`);
+  $("#modal .cancel").addEventListener("click", closeModal);
+  $("#modal .confirm").addEventListener("click", async () => {
+    if (!on && !peerPub) return toast("Собеседник ещё не заходил в 3.0 — ключа нет");
+    try {
+      await updateDoc(doc(dbf, "chats", v.id), { e2e: !on });
+      closeModal();
+      toast(!on ? "Шифрование включено 🔒" : "Шифрование выключено");
+    } catch (error) { toast(ruError(error)); }
+  });
+}
+
+// ---------- 3.0: исчезающие сообщения ----------
+function openTtlModal(v) {
+  const cur = v.raw?.ttl || 0;
+  const group = v.type === "group" || v.type === "channel";
+  if (group && !isChatAdmin(v.raw)) return toast("Таймер в группе меняет только админ");
+  openModal(`<h3>Исчезающие сообщения</h3>
+    <p class="modal-note">Новые сообщения будут удаляться сами по истечении срока. Уже отправленные не тронем.</p>
+    <div id="ttlOpts">${TTL_OPTIONS.map(o =>
+      `<button type="button" class="settings-row ttl-opt${o.ms === cur ? " active" : ""}" data-ms="${o.ms}"><span class="row-icon">${o.ms ? "🔥" : "✖"}</span><span>${escapeHtml(o.label)}</span></button>`).join("")}</div>
+    <div class="modal-actions"><button class="cancel">Закрыть</button></div>`);
+  $("#modal .cancel").addEventListener("click", closeModal);
+  document.querySelectorAll(".ttl-opt").forEach(b => b.addEventListener("click", async () => {
+    const ms = Number(b.dataset.ms);
+    try {
+      await updateDoc(doc(dbf, "chats", v.id), { ttl: ms || null });
+      closeModal();
+      toast(ms ? `Сообщения исчезают через ${ttlLabel(ms)}` : "Исчезающие сообщения выключены");
+    } catch (error) { toast(ruError(error)); }
+  }));
+}
+
+// ---------- 3.0: отложенная отправка ----------
+function openScheduleModal() {
+  const chat = currentChat();
+  if (!chat) return toast("Откройте чат");
+  const soon = new Date(Date.now() + 3600e3 - new Date().getTimezoneOffset() * 60e3).toISOString().slice(0, 16);
+  openModal(`<h3>Отложенная отправка</h3>
+    <p class="modal-note">Сообщение отправит сервер в указанное время — телефон и браузер могут быть выключены.</p>
+    <label class="field"><span>Текст</span><textarea id="schedText" maxlength="4096" rows="3" placeholder="Что отправить?"></textarea></label>
+    <label class="field"><span>Когда</span><input id="schedAt" type="datetime-local" value="${soon}" /></label>
+    <div id="schedList"></div>
+    <div class="modal-actions"><button class="cancel">Отмена</button><button class="confirm">Запланировать</button></div>`);
+  $("#schedText").value = messageInput.value.trim();
+  renderScheduledList(chat.id);
+  $("#modal .cancel").addEventListener("click", closeModal);
+  $("#modal .confirm").addEventListener("click", async () => {
+    const text = $("#schedText").value.trim();
+    const sendAt = new Date($("#schedAt").value).getTime();
+    if (!text) return toast("Введите текст");
+    if (!(sendAt > Date.now() + 30e3)) return toast("Выберите время хотя бы через минуту");
+    try {
+      await setDoc(doc(collection(dbf, "scheduled")), {
+        uid: me.uid, chatId: chat.id, text, sendAt, createdAt: Date.now(),
+        senderName: me.displayName || me.username, topicId: currentTopic?.id || "general",
+      });
+      closeModal();
+      messageInput.value = ""; autoGrow(messageInput);
+      toast(`Отправим ${new Date(sendAt).toLocaleString("ru-RU", { day: "numeric", month: "long", hour: "2-digit", minute: "2-digit" })}`);
+    } catch (error) { toast(ruError(error)); }
+  });
+}
+
+// Список уже запланированных для этого чата, с возможностью отменить
+async function renderScheduledList(chatId) {
+  const box = $("#schedList");
+  if (!box) return;
+  let snap;
+  try { snap = await getDocs(query(collection(dbf, "scheduled"), where("uid", "==", me.uid), limit(50))); }
+  catch { return; }
+  const jobs = snap.docs.filter(d => d.data().chatId === chatId).sort((a, b) => a.data().sendAt - b.data().sendAt);
+  if (!jobs.length) return box.replaceChildren();
+  box.innerHTML = `<p class="modal-note">В очереди:</p>` + jobs.map(d => {
+    const j = d.data();
+    return `<div class="sched-row"><span>${new Date(j.sendAt).toLocaleString("ru-RU", { day: "numeric", month: "short", hour: "2-digit", minute: "2-digit" })} — ${escapeHtml((j.text || "").slice(0, 40))}</span><button type="button" class="sched-del" data-id="${d.id}">✖</button></div>`;
+  }).join("");
+  box.querySelectorAll(".sched-del").forEach(b => b.addEventListener("click", async () => {
+    try { await deleteDoc(doc(dbf, "scheduled", b.dataset.id)); renderScheduledList(chatId); toast("Отменено"); }
+    catch (error) { toast(ruError(error)); }
+  }));
+}
+
+// ---------- 3.0: мини-игра ----------
+async function startTttGame() {
+  const chat = currentChat();
+  if (!chat) return;
+  const peer = (chat.members || []).find(u => u !== me.uid);
+  if (!peer) return toast("Игру можно начать только в личном чате");
+  try { await sendMessage({ game: newTttGame(me.uid, peer), text: "" }); }
+  catch (error) { toast(ruError(error)); }
+}
+
+// ---------- 3.0: папки чатов ----------
+// Живут в users/{uid}/private/prefs — правила пускают туда только владельца.
+let myFolders = [];
+let activeFolder = "all";
+let foldersUnsub = null;
+function watchFolders() {
+  return onSnapshot(doc(dbf, "users", me.uid, "private", "prefs"), (snap) => {
+    myFolders = snap.data()?.folders || [];
+    renderFolderBar();
+    renderChatList();
+  }, () => {});
+}
+async function saveFolders(folders) {
+  myFolders = folders;
+  await setDoc(doc(dbf, "users", me.uid, "private", "prefs"), { folders }, { merge: true });
+}
+
+function renderFolderBar() {
+  const bar = $("#folderBar");
+  if (!bar) return;
+  const list = [...chats.values()].map(viewOf);
+  const withCounts = foldersWithCounts(myFolders, list, (c) => c.unread || 0);
+  bar.classList.toggle("hidden", myFolders.length === 0);
+  bar.replaceChildren();
+  for (const f of withCounts) {
+    const btn = document.createElement("button");
+    btn.className = "folder-chip" + (f.id === activeFolder ? " active" : "");
+    btn.innerHTML = `${f.icon || "🗂"} ${escapeHtml(f.name)}${f.count ? `<span class="fc-count">${f.count}</span>` : ""}`;
+    btn.addEventListener("click", () => { activeFolder = f.id; renderFolderBar(); renderChatList(); });
+    bar.appendChild(btn);
+  }
+}
+
+function openFolderPickModal(v) {
+  const rows = myFolders.map(f =>
+    `<button type="button" class="settings-row folder-toggle" data-id="${escapeHtml(f.id)}"><span class="row-icon">${f.icon || "🗂"}</span><span>${escapeHtml(f.name)}</span><span class="row-tail">${(f.chatIds || []).includes(v.id) ? "✓" : ""}</span></button>`).join("");
+  openModal(`<h3>Папки</h3>
+    ${rows || '<p class="modal-note">Папок пока нет — создайте первую.</p>'}
+    <label class="field"><span>Новая папка</span><input id="newFolderName" maxlength="24" placeholder="Работа" /></label>
+    <div class="modal-actions"><button class="cancel">Закрыть</button><button class="confirm">Создать папку</button></div>`);
+  $("#modal .cancel").addEventListener("click", closeModal);
+  $("#modal .confirm").addEventListener("click", async () => {
+    const name = $("#newFolderName").value.trim().slice(0, 24);
+    if (!name) return toast("Введите название");
+    if (myFolders.length >= 10) return toast("Больше 10 папок не нужно");
+    try {
+      await saveFolders([...myFolders, { id: randomId(8), name, icon: "🗂", chatIds: [v.id] }]);
+      closeModal(); toast(`Папка «${name}» создана`);
+    } catch (error) { toast(ruError(error)); }
+  });
+  document.querySelectorAll(".folder-toggle").forEach(b => b.addEventListener("click", async () => {
+    const next = myFolders.map(f => {
+      if (f.id !== b.dataset.id) return f;
+      const ids = new Set(f.chatIds || []);
+      ids.has(v.id) ? ids.delete(v.id) : ids.add(v.id);
+      return { ...f, chatIds: [...ids] };
+    });
+    try { await saveFolders(next); openFolderPickModal(v); } catch (error) { toast(ruError(error)); }
+  }));
+}
+
 // ---------- messages: отрисовка ----------
 const TICK_ONE = '<svg viewBox="0 0 18 12" width="17" height="12"><path d="M2 6.5 6 10.5 14.5 1.5" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"/></svg>';
 const TICK_TWO = '<svg viewBox="0 0 24 12" width="21" height="12"><path d="M2 6.5 6 10.5 14.5 1.5" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"/><path d="M11.5 9 13 10.5 21.5 1.5" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"/></svg>';
@@ -1296,6 +1531,27 @@ function refreshTicks() {
     }
   });
 }
+// Медиа 3.0: сам файл лежит в R2, в документе — только ссылка и метаданные.
+function renderMediaHtml(message) {
+  const m = message.media;
+  if (!m || !m.url) return "";
+  const url = escapeHtml(m.url);
+  const name = escapeHtml(m.name || "Файл");
+  const size = fmtBytes(m.size);
+  if (m.kind === "image") return `<img class="photo r2" src="${url}" alt="${name}" loading="lazy" />`;
+  if (m.kind === "video") return `<video class="video-msg" controls preload="metadata" playsinline src="${url}"></video>`;
+  if (m.kind === "audio") return `<span class="voice-wrap"><audio class="voice-msg" controls preload="metadata" src="${url}"></audio><small class="voice-len">${name}</small></span>`;
+  return `<a class="file-card" href="${url}" target="_blank" rel="noopener noreferrer" download="${name}">
+    <span class="fc-icon">📎</span><span class="fc-body"><strong>${name}</strong><em>${size}</em></span></a>`;
+}
+
+// Подпись про исчезновение: обновляется вместе с общим таймером интерфейса
+function renderTtlHtml(message) {
+  if (message.viewOnce) return `<span class="ttl-badge" title="Одноразовое">👁 1 раз</span>`;
+  if (!message.expiresAt) return "";
+  return `<span class="ttl-badge" data-expires="${message.expiresAt}">🔥 ${escapeHtml(ttlLeft(message.expiresAt))}</span>`;
+}
+
 function buildMessageNode(message) {
   const row = document.createElement("div");
   const mine = message.sender === me.uid;
@@ -1320,8 +1576,10 @@ function buildMessageNode(message) {
     ${message.preview ? `<div class="link-preview"><a href="${escapeHtml(message.preview.url)}" target="_blank" rel="noopener noreferrer">${message.preview.image ? `<img src="${escapeHtml(message.preview.image)}" alt="" loading="lazy" class="lp-img" />` : ""}<span class="lp-body"><strong>${escapeHtml(message.preview.title || message.preview.url)}</strong>${message.preview.desc ? `<em>${escapeHtml(message.preview.desc)}</em>` : ""}</span></a></div>` : ""}
     ${message.voice ? `<span class="voice-wrap"><audio class="voice-msg" controls preload="metadata" src="${escapeHtml(message.voice.data)}"></audio><small class="voice-len">${message.voice.duration || 0} сек</small></span>` : ""}
     ${message.poll ? renderPollHtml(message) : ""}
-    <span class="msg-text">${formatMessageText(message.text || "")}</span>
-    <span class="meta"><span class="edited">${message.editedAt ? "изм. " : ""}</span>${formatTime(message.createdAt)} ${ticksFor(message)}</span>
+    ${message.media ? renderMediaHtml(message) : ""}
+    ${message.game ? renderGameHtml(message) : ""}
+    <span class="msg-text">${formatMessageText(message.enc ? decryptMessage(message) : (message.text || ""))}</span>
+    <span class="meta"><span class="edited">${message.editedAt ? "изм. " : ""}</span>${renderTtlHtml(message)}${formatTime(message.createdAt)} ${ticksFor(message)}</span>
     <div class="reactions"></div>
   </div>`;
   renderReactions(row);
@@ -1329,7 +1587,17 @@ function buildMessageNode(message) {
     const target = document.querySelector(`[data-message-id="${message.replyTo.id}"]`);
     if (target) target.scrollIntoView({ behavior: "smooth", block: "center" });
   });
-  row.querySelector(".photo")?.addEventListener("click", () => openModal(`<img src="${escapeHtml(message.image)}" style="width:100%;border-radius:14px" />`));
+  const photoSrc = message.image || (message.media?.kind === "image" ? message.media.url : "");
+  if (photoSrc) row.querySelector(".photo")?.addEventListener("click", () => openModal(`<img src="${escapeHtml(photoSrc)}" style="width:100%;border-radius:14px" />`));
+  if (message.game) wireGameNode(row, message);
+  // Одноразовое: как только получатель открыл — помечаем просмотр, и оно исчезает у всех
+  if (message.viewOnce && message.sender !== me.uid && !(message.viewedBy || {})[me.uid]) {
+    row.classList.add("view-once-hidden");
+    row.querySelector(".bubble")?.addEventListener("click", () => {
+      row.classList.remove("view-once-hidden");
+      markViewOnce(message);
+    }, { once: true });
+  }
   attachPress(row, (e) => showMessageContextMenu(e, row));
   row.addEventListener("dblclick", () => toggleReaction(message, "❤️"));
   return row;
@@ -1347,6 +1615,38 @@ function renderReactions(node) {
     box.appendChild(chip);
   }
 }
+// ---------- одноразовые сообщения ----------
+async function markViewOnce(message) {
+  try {
+    await updateDoc(doc(dbf, "chats", currentChatId, "messages", message.id), { [`viewedBy.${me.uid}`]: Date.now() });
+  } catch (error) { toast(ruError(error)); }
+}
+
+// ---------- мини-игра: крестики-нолики прямо в пузыре ----------
+function renderGameHtml(message) {
+  const g = message.game;
+  if (!g || g.kind !== "ttt") return "";
+  const mine = tttMark(g, me.uid);
+  const status = g.winner === "draw" ? "Ничья"
+    : g.winner ? (g.winner === me.uid ? "Вы победили 🎉" : "Соперник победил")
+    : g.turn === me.uid ? `Ваш ход (${mine})` : "Ход соперника";
+  const cells = [...g.board].map((c, i) => {
+    const win = (g.line || []).includes(i) ? " win" : "";
+    return `<button class="ttt-cell${win}" data-cell="${i}"${c === "-" ? "" : " disabled"}>${c === "-" ? "" : c}</button>`;
+  }).join("");
+  return `<div class="ttt"><div class="ttt-board">${cells}</div><small class="ttt-status">${escapeHtml(status)}</small></div>`;
+}
+
+function wireGameNode(row, message) {
+  row.querySelectorAll(".ttt-cell").forEach(btn => btn.addEventListener("click", async (e) => {
+    e.stopPropagation();
+    const next = tttMove(message.game, me.uid, Number(btn.dataset.cell));
+    if (typeof next === "string") return toast(next);
+    try { await updateDoc(doc(dbf, "chats", currentChatId, "messages", message.id), { game: next }); }
+    catch (error) { toast(ruError(error)); }
+  }));
+}
+
 async function toggleReaction(message, emoji) {
   const ref = doc(dbf, "chats", currentChatId, "messages", message.id);
   const patch = {};
@@ -1388,7 +1688,7 @@ messageInput.addEventListener("keydown", (e) => {
   }
   if (e.key === "Enter" && !e.shiftKey && !("ontouchstart" in window)) { e.preventDefault(); $("#messageForm").requestSubmit(); }
 });
-async function sendMessage({ text = "", image = null, sticker = null, voice = null, poll = null, toChatId = null, forwardedFrom = null }) {
+async function sendMessage({ text = "", image = null, sticker = null, voice = null, poll = null, media = null, game = null, viewOnce = false, toChatId = null, forwardedFrom = null }) {
   const chatId = toChatId || currentChatId;
   const chat = chats.get(chatId);
   if (!chat) return;
@@ -1400,7 +1700,20 @@ async function sendMessage({ text = "", image = null, sticker = null, voice = nu
   if (sticker) message.sticker = sticker;
   if (voice) message.voice = voice;
   if (poll) message.poll = poll;
+  if (media) message.media = media;
+  if (game) message.game = game;
+  if (viewOnce) { message.viewOnce = true; message.viewedBy = {}; }
+  // Исчезающие сообщения: таймер чата превращается в срок жизни сообщения,
+  // клиент прячет просроченное сразу, а окончательно удаляет push-worker.
+  if (chat.ttl > 0) message.expiresAt = message.createdAt + chat.ttl;
   if (forwardedFrom) message.forwardedFrom = forwardedFrom;
+  // Секретный чат: текст уезжает конвертами enc[uid], plaintext в базу не попадает
+  if (chat.e2e && message.text) {
+    if (!myKeys) throw new Error("Нет ключа шифрования на этом устройстве");
+    const pubs = await pubKeysFor(chat);
+    message.enc = sealForMembers(chat.members, pubs, myKeys.secret, message.text);
+    message.text = "";
+  }
   if (!toChatId && replyTarget) message.replyTo = { id: replyTarget.id, sender: replyTarget.senderName, text: replyTarget.text ? replyTarget.text.slice(0, 120) : "📷 Фото" };
   // @упоминания → массив uid для уведомлений
   if (text) {
@@ -1424,9 +1737,14 @@ async function sendMessage({ text = "", image = null, sticker = null, voice = nu
     } catch { /* превью не критично */ }
   }
   const ref = doc(collection(dbf, "chats", chatId, "messages"));
-  const previewText = message.text || (sticker ? "🧩 Стикер" : voice ? "🎤 Голосовое сообщение" : poll ? "📊 Опрос" : "");
+  const mediaPreview = media
+    ? (media.kind === "video" ? "🎬 Видео" : media.kind === "audio" ? "🎵 Аудио" : media.kind === "image" ? "🖼 Изображение" : `📎 ${media.name || "Файл"}`)
+    : "";
+  const previewText = (chat.e2e ? "🔒 Секретное сообщение" : message.text)
+    || (sticker ? "🧩 Стикер" : voice ? "🎤 Голосовое сообщение" : poll ? "📊 Опрос"
+        : game ? "🎮 Крестики-нолики" : mediaPreview);
   const chatPatch = {
-    lastMessage: { text: previewText, senderUid: me.uid, senderName: message.senderName, createdAt: message.createdAt, hasImage: !!image },
+    lastMessage: { text: previewText, senderUid: me.uid, senderName: message.senderName, createdAt: message.createdAt, hasImage: !!image || media?.kind === "image" },
     [`lastRead.${me.uid}`]: message.createdAt,
     [`unread.${me.uid}`]: 0,
     [`typing.${me.uid}`]: 0,
@@ -1646,20 +1964,111 @@ async function getUsernameUid(name) {
   return null;
 }
 
-// ---------- фото ----------
+// ---------- вложения: фото, видео, любые файлы ----------
+// До 3.0 фото уезжало base64 прямо в документ Firestore (лимит ~700 КБ и никаких видео).
+// Теперь файл уходит в R2 через воркер, а в сообщении остаётся только ссылка.
 $("#attachButton").addEventListener("click", () => $("#fileInput").click());
+// Долгое нажатие на скрепку — режим «одноразового» вложения (сгорает после просмотра)
+let nextViewOnce = false;
+attachPress($("#attachButton"), () => {
+  nextViewOnce = !nextViewOnce;
+  $("#attachButton").classList.toggle("view-once-armed", nextViewOnce);
+  toast(nextViewOnce ? "Следующее вложение — одноразовое 👁" : "Обычная отправка");
+});
 $("#fileInput").addEventListener("change", async () => {
   const file = $("#fileInput").files[0];
   $("#fileInput").value = "";
   if (!file || !currentChatId) return;
   const chat = currentChat();
   if (isForum(chat) && !currentTopic) return;
-  let image = await compressImage(file, 1100, 0.8);
-  if (image && image.length > 700_000) image = await compressImage(file, 800, 0.6);
-  if (!image) return toast("Не удалось обработать изображение");
-  if (image.length > 900_000) return toast("Фото слишком большое");
-  try { await sendMessage({ image }); cancelReplyEdit(); }
-  catch (error) { toast(ruError(error)); }
+  await attachFile(file);
+});
+
+// Отправка одного файла: картинки сжимаем, остальное грузим как есть
+async function attachFile(file) {
+  if (file.size > MEDIA_MAX_BYTES) return toast(`Файл больше ${fmtBytes(MEDIA_MAX_BYTES)} — не отправить`);
+  const kind = mediaKind(file.type);
+  const hasWorker = !!window.QR_WORKER_URL;
+
+  // Резервный путь: воркер не настроен — маленькая картинка всё ещё уедет base64
+  if (!hasWorker) {
+    if (kind !== "image") return toast("Хранилище файлов недоступно — можно отправить только фото");
+    let image = await compressImage(file, 1100, 0.8);
+    if (image && image.length > 700_000) image = await compressImage(file, 800, 0.6);
+    if (!image || image.length > 900_000) return toast("Фото слишком большое");
+    try {
+      await sendMessage({ image, viewOnce: nextViewOnce });
+      if (nextViewOnce) { nextViewOnce = false; $("#attachButton").classList.remove("view-once-armed"); }
+      cancelReplyEdit();
+    } catch (e) { toast(ruError(e)); }
+    return;
+  }
+
+  let upload = file;
+  // Фото свыше 1.5 МБ пережимаем: качество на глаз не падает, а трафик экономится
+  if (kind === "image" && file.size > 1.5 * 1024 * 1024) {
+    const dataUrl = await compressImage(file, 2048, 0.85);
+    if (dataUrl) {
+      const blob = await (await fetch(dataUrl)).blob();
+      if (blob.size < file.size) upload = new File([blob], (file.name || "photo").replace(/\.[^.]+$/, "") + ".jpg", { type: "image/jpeg" });
+    }
+  }
+
+  const bar = showUploadBar(file.name || "Файл");
+  try {
+    const media = await uploadMedia(window.QR_WORKER_URL, () => auth.currentUser.getIdToken(), upload,
+      { onProgress: (p) => bar.set(p) });
+    await sendMessage({ media, viewOnce: nextViewOnce });
+    if (nextViewOnce) { nextViewOnce = false; $("#attachButton").classList.remove("view-once-armed"); }
+    cancelReplyEdit();
+  } catch (error) {
+    toast(error?.message || ruError(error));
+  } finally { bar.done(); }
+}
+
+// Полоска прогресса загрузки над полем ввода
+function showUploadBar(name) {
+  const box = document.createElement("div");
+  box.className = "upload-bar";
+  box.innerHTML = `<span class="up-name"></span><span class="up-track"><i></i></span><span class="up-pct">0%</span>`;
+  box.querySelector(".up-name").textContent = name.slice(0, 40);
+  $("#conversationInner").insertBefore(box, $("#messageForm"));
+  return {
+    set(p) {
+      const pct = Math.round(Math.min(1, Math.max(0, p)) * 100);
+      box.querySelector("i").style.width = pct + "%";
+      box.querySelector(".up-pct").textContent = pct + "%";
+    },
+    done() { box.remove(); },
+  };
+}
+
+// Перетаскивание файлов в окно чата
+const dropZone = $("#conversationInner");
+["dragenter", "dragover"].forEach(ev => dropZone.addEventListener(ev, (e) => {
+  if (!currentChatId || !e.dataTransfer?.types?.includes("Files")) return;
+  e.preventDefault(); dropZone.classList.add("drag-over");
+}));
+["dragleave", "drop"].forEach(ev => dropZone.addEventListener(ev, (e) => {
+  if (ev === "dragleave" && dropZone.contains(e.relatedTarget)) return;
+  dropZone.classList.remove("drag-over");
+}));
+dropZone.addEventListener("drop", async (e) => {
+  if (!currentChatId || !e.dataTransfer?.files?.length) return;
+  e.preventDefault();
+  const chat = currentChat();
+  if (isForum(chat) && !currentTopic) return;
+  for (const file of [...e.dataTransfer.files].slice(0, 5)) await attachFile(file);
+});
+
+// Вставка картинки из буфера (Ctrl+V в поле ввода)
+messageInput.addEventListener("paste", async (e) => {
+  const item = [...(e.clipboardData?.items || [])].find(i => i.type.startsWith("image/"));
+  if (!item || !currentChatId) return;
+  const file = item.getAsFile();
+  if (!file) return;
+  e.preventDefault();
+  await attachFile(new File([file], `paste-${Date.now()}.png`, { type: file.type }));
 });
 function compressImage(file, max, quality) {
   return new Promise((resolve) => {
@@ -1812,6 +2221,11 @@ function showChatContextMenu(point, v) {
     <button data-act="mute">${v.muted ? "🔔 Включить звук" : "🔇 Без звука"}</button>
     <button data-act="read">✓ Прочитано</button>
     <button data-act="poll">📊 Создать опрос</button>
+    <button data-act="schedule">⏰ Отложенная отправка</button>
+    ${v.type === "private" ? '<button data-act="game">🎮 Крестики-нолики</button>' : ""}
+    ${v.type === "private" ? `<button data-act="e2e">${v.raw?.e2e ? "🔒 Секретный чат: вкл" : "🔓 Включить шифрование"}</button>` : ""}
+    <button data-act="ttl">🔥 Исчезающие: ${escapeHtml(ttlLabel(v.raw?.ttl || 0))}</button>
+    <button data-act="folder">🗂 В папку…</button>
     ${v.type === "group" ? '<button data-act="topic"># Создать топик</button>' : ""}
     <button data-act="clear">🧹 Очистить историю</button>
     ${v.type !== "saved" ? `<button data-act="delete" class="danger">🗑 ${v.type === "group" || v.type === "channel" ? "Покинуть/удалить" : "Удалить чат"}</button>` : ""}
@@ -1826,6 +2240,11 @@ function showChatContextMenu(point, v) {
       else if (act === "read") markRead(v.id);
       else if (act === "topic") { if (currentChatId !== v.id) await openChat(v.id); openCreateTopicModal(); }
       else if (act === "poll") { if (currentChatId !== v.id) await openChat(v.id); openCreatePollModal(); }
+      else if (act === "schedule") { if (currentChatId !== v.id) await openChat(v.id); openScheduleModal(); }
+      else if (act === "game") { if (currentChatId !== v.id) await openChat(v.id); await startTttGame(); }
+      else if (act === "ttl") openTtlModal(v);
+      else if (act === "e2e") { await fetchUser((v.raw.members || []).find(u => u !== me.uid)); openE2EModal(v); }
+      else if (act === "folder") openFolderPickModal(v);
       else if (act === "clear") {
         openConfirm(`Очистить историю «${v.title}»? Удалятся сообщения, которые вы вправе удалять.`, async () => {
           const snap = await getDocs(query(collection(dbf, "chats", v.id, "messages"), limit(400)));

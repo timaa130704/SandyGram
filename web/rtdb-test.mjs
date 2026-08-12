@@ -74,6 +74,28 @@ await set(ref(caller.db, "bump/chat1"), Date.now());
 check("authed writes bump", true);
 check("authed reads bump tree", (await get(ref(caller.db, "bump"))).exists());
 
+// --- 3.0: bump нельзя использовать как свалку ---
+await expectDenied("bump rejects non-numeric payload", () => set(ref(caller.db, "bump/chat2"), { junk: "x".repeat(100) }));
+await expectDenied("bump rejects faked future timestamp", () => set(ref(caller.db, "bump/chat3"), Date.now() + 86400e3));
+await expectDenied("bump rejects stale timestamp", () => set(ref(caller.db, "bump/chat4"), Date.now() - 86400e3));
+
+// --- 3.0: QR-вход отдаёт зашифрованный конверт, а не сырой refresh-токен ---
+const tok2 = "b1b2c3d4e5f6a7b8c9d0e1f2a3b4c5d6";
+await set(ref(anon.db, `qrlogin/${tok2}`), { status: "pending", created: Date.now(), pub: "PCPUBKEY" });
+check("PC publishes ephemeral pubkey", true);
+await set(ref(phone.db, `qrlogin/${tok2}`), { status: "ok", sealed: "CIPHERTEXT", nonce: "NONCE", at: Date.now(), uid: phoneUid });
+check("phone writes sealed envelope", true);
+await expectDenied("qrlogin rejects unknown fields", () =>
+  set(ref(phone.db, `qrlogin/${tok2}`), { status: "ok", sealed: "x", evil: "payload", at: Date.now() }));
+await expectDenied("qrlogin rejects oversized envelope", () =>
+  set(ref(phone.db, `qrlogin/${tok2}`), { status: "ok", sealed: "x".repeat(5000), at: Date.now() }));
+
+// --- звонок: подменить 'from' после создания нельзя ---
+await set(ref(caller.db, `calls/${calleeUid}/call_test2`), { from: callerUid, offer: "OFFER", status: "ringing" });
+await expectDenied("cannot rewrite call 'from' after create", () =>
+  update(ref(callee.db, `calls/${calleeUid}/call_test2`), { from: otherUid }));
+await remove(ref(callee.db, `calls/${calleeUid}/call_test2`));
+
 // --- прочее дерево закрыто ---
 await expectDenied("unknown path write denied", () => set(ref(caller.db, "secret/x"), 1));
 

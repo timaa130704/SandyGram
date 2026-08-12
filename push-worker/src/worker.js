@@ -50,6 +50,17 @@ const val = (f) => {
 };
 const fromFields = (fields) => Object.fromEntries(Object.entries(fields || {}).map(([k, v]) => [k, val(v)]));
 
+// Обратное преобразование: JS-значение -> формат полей Firestore REST
+const toValue = (v) => {
+  if (v === null || v === undefined) return { nullValue: null };
+  if (typeof v === "string") return { stringValue: v };
+  if (typeof v === "boolean") return { booleanValue: v };
+  if (typeof v === "number") return Number.isInteger(v) ? { integerValue: String(v) } : { doubleValue: v };
+  if (Array.isArray(v)) return { arrayValue: { values: v.map(toValue) } };
+  return { mapValue: { fields: toFields(v) } };
+};
+const toFields = (obj) => Object.fromEntries(Object.entries(obj || {}).map(([k, v]) => [k, toValue(v)]));
+
 async function runQuery(H, structuredQuery) {
   const rows = await fetch(`${FS_BASE}:runQuery`, { method: "POST", headers: H, body: JSON.stringify({ structuredQuery }) }).then(r => r.json());
   return (rows || []).filter(r => r.document).map(r => ({ id: r.document.name.split("/").pop(), ...fromFields(r.document.fields) }));
@@ -93,6 +104,75 @@ async function sendToTokens(H, user, { title, body, chatId }) {
     } else sent++;
   }
   return sent;
+}
+
+// ---------- отложенная отправка ----------
+// Клиент кладёт задание в коллекцию scheduled, cron раз в минуту разносит созревшие.
+async function deliverScheduled(H, now) {
+  const due = await runQuery(H, {
+    from: [{ collectionId: "scheduled" }],
+    where: { fieldFilter: { field: { fieldPath: "sendAt" }, op: "LESS_THAN_OR_EQUAL", value: { integerValue: String(now) } } },
+    orderBy: [{ field: { fieldPath: "sendAt" }, direction: "ASCENDING" }],
+    limit: 50,
+  });
+  let delivered = 0;
+  for (const job of due) {
+    try {
+      const chat = await getDocById(H, `chats/${job.chatId}`);
+      // Задание могло переехать: чат удалён или автора выгнали — просто выбрасываем.
+      if (!chat || !(chat.members || []).includes(job.uid)) {
+        await fetch(`${FS_BASE}/scheduled/${job.id}`, { method: "DELETE", headers: H }).catch(() => {});
+        continue;
+      }
+      const createdAt = Date.now();
+      const message = {
+        sender: job.uid, senderName: job.senderName || "", text: job.text || "", image: job.image || null,
+        createdAt, reactions: {}, topicId: job.topicId || "general", scheduled: true,
+        ...(job.media ? { media: job.media } : {}),
+      };
+      await fetch(`${FS_BASE}/chats/${job.chatId}/messages`, {
+        method: "POST", headers: H, body: JSON.stringify({ fields: toFields(message) }),
+      });
+      // lastMessage и счётчики непрочитанного — как это делает клиент при обычной отправке
+      const unread = Object.fromEntries((chat.members || [])
+        .filter(uid => uid !== job.uid)
+        .map(uid => [uid, ((chat.unread || {})[uid] || 0) + 1]));
+      const lastMessage = {
+        text: job.text || "", senderUid: job.uid, senderName: job.senderName || "",
+        createdAt, hasImage: !!(job.image || job.media),
+      };
+      const mask = "updateMask.fieldPaths=lastMessage&" + Object.keys(unread).map(u => `updateMask.fieldPaths=unread.${u}`).join("&");
+      await fetch(`${FS_BASE}/chats/${job.chatId}?${mask}`, {
+        method: "PATCH", headers: H,
+        body: JSON.stringify({ fields: { lastMessage: toValue(lastMessage), unread: toValue({ ...(chat.unread || {}), ...unread }) } }),
+      });
+      await fetch(`${FS_BASE}/scheduled/${job.id}`, { method: "DELETE", headers: H }).catch(() => {});
+      delivered++;
+    } catch (e) { console.error("scheduled job", job.id, String(e)); }
+  }
+  return delivered;
+}
+
+// ---------- исчезающие сообщения ----------
+// В чате с ttl клиент ставит сообщению expiresAt; здесь просроченные реально удаляются.
+async function purgeExpiring(H, now) {
+  const chats = await runQuery(H, {
+    from: [{ collectionId: "chats" }],
+    where: { fieldFilter: { field: { fieldPath: "ttl" }, op: "GREATER_THAN", value: { integerValue: "0" } } },
+    limit: 50,
+  });
+  let purged = 0;
+  for (const chat of chats) {
+    const url = `${FS_BASE}/chats/${chat.id}/messages?pageSize=100&orderBy=${encodeURIComponent('"createdAt asc"')}`;
+    const d = await fetch(url, { headers: H }).then(r => r.json()).catch(() => null);
+    for (const doc of d?.documents || []) {
+      const m = fromFields(doc.fields);
+      if (!m.expiresAt || m.expiresAt > now) continue;
+      await fetch(`${FS_BASE}/chats/${chat.id}/messages/${doc.name.split("/").pop()}`, { method: "DELETE", headers: H }).catch(() => {});
+      purged++;
+    }
+  }
+  return purged;
 }
 
 // ---------- основной проход ----------
@@ -156,6 +236,11 @@ async function tick(env) {
     }
   }
 
+  // Отложенные сообщения и уборка исчезающих — на том же проходе cron.
+  let scheduled = 0, expiring = 0;
+  try { scheduled = await deliverScheduled(H, startedAt); } catch (e) { console.error("scheduled:", String(e)); }
+  try { expiring = await purgeExpiring(H, startedAt); } catch (e) { console.error("expiring:", String(e)); }
+
   // Чистим просроченные QR-логины: в узлах qrlogin лежит refresh-токен телефона,
   // поэтому мёртвые/использованные записи удаляем каждую минуту (сервисный токен обходит правила RTDB).
   let qrCleaned = 0;
@@ -200,7 +285,7 @@ async function tick(env) {
     method: "PATCH", headers: H,
     body: JSON.stringify({ fields: { lastRun: { integerValue: String(newLastRun) } } }),
   });
-  return { chats: chats.length, sent, cleaned, qrCleaned };
+  return { chats: chats.length, sent, cleaned, qrCleaned, scheduled, expiring };
 }
 
 // ---------- QR-вход: refresh-токен → Firebase Custom Token ----------
@@ -239,6 +324,36 @@ async function customToken(env, uid) {
   const sig = await crypto.subtle.sign("RSASSA-PKCS1-v1_5", key, enc.encode(unsigned));
   return `${unsigned}.${b64url(sig)}`;
 }
+
+// ---------- Медиа в R2 ----------
+// Раньше фото/голосовые лежали base64 внутри документа Firestore: лимит 1 МБ на документ,
+// быстрое выжигание квоты и никаких видео. Теперь файл уходит в R2, а в сообщении
+// остаётся только ключ. Ключи случайные (capability URL) — угадать чужой нельзя.
+const MEDIA_MAX_BYTES = 25 * 1024 * 1024;
+const MEDIA_TYPES_OK = /^(image|video|audio)\/[a-z0-9.+-]+$|^application\/(pdf|zip|octet-stream)$/i;
+
+// Проверка Firebase ID-токена: один вызов identitytoolkit, обратно uid.
+async function uidByIdToken(idToken) {
+  const r = await fetch(`https://identitytoolkit.googleapis.com/v1/accounts:lookup?key=${WEB_API_KEY}`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ idToken }),
+  });
+  if (!r.ok) return null;
+  const d = await r.json().catch(() => null);
+  return d?.users?.[0]?.localId || null;
+}
+
+const mediaKey = (uid, ext) => `${uid}/${crypto.randomUUID().replace(/-/g, "")}${ext}`;
+const extOf = (type) => {
+  const map = {
+    "image/jpeg": ".jpg", "image/png": ".png", "image/webp": ".webp", "image/gif": ".gif",
+    "video/mp4": ".mp4", "video/webm": ".webm", "video/quicktime": ".mov",
+    "audio/mpeg": ".mp3", "audio/webm": ".webm", "audio/mp4": ".m4a", "audio/ogg": ".ogg",
+    "application/pdf": ".pdf", "application/zip": ".zip",
+  };
+  return map[String(type).toLowerCase()] || ".bin";
+};
 
 // Защита от SSRF: пускаем превью только на публичные http(s)-хосты,
 // блокируя localhost, .local/.internal и приватные/loopback/link-local IP-адреса.
@@ -287,7 +402,7 @@ async function readCapped(resp, maxBytes = 512 * 1024) {
 const CORS = {
   "Access-Control-Allow-Origin": "*",
   "Access-Control-Allow-Methods": "GET, POST, OPTIONS",
-  "Access-Control-Allow-Headers": "Content-Type",
+  "Access-Control-Allow-Headers": "Content-Type, Authorization, X-Media-Type, X-Media-Name",
   "Access-Control-Max-Age": "86400",
 };
 const json = (body, status = 200) => Response.json(body, { status, headers: CORS });
@@ -317,6 +432,54 @@ export default {
         return json({ error: String(e) }, 500);
       }
     }
+    // Загрузка медиа: POST /media/upload, тело = сырые байты.
+    // Authorization: Bearer <Firebase ID token>, X-Media-Type: image/jpeg, X-Media-Name: имя файла.
+    // Ответ: {key, url, size, type, name}
+    if (request.method === "POST" && url.pathname === "/media/upload") {
+      if (!env.MEDIA) return json({ error: "media storage not configured" }, 503);
+      const idToken = (request.headers.get("authorization") || "").replace(/^Bearer\s+/i, "").trim();
+      if (!idToken) return json({ error: "auth required" }, 401);
+      const uid = await uidByIdToken(idToken);
+      if (!uid) return json({ error: "bad token" }, 401);
+
+      const type = (request.headers.get("x-media-type") || "application/octet-stream").split(";")[0].trim();
+      if (!MEDIA_TYPES_OK.test(type)) return json({ error: "type not allowed" }, 415);
+      const declared = Number(request.headers.get("content-length") || 0);
+      if (declared > MEDIA_MAX_BYTES) return json({ error: "too large", max: MEDIA_MAX_BYTES }, 413);
+
+      const body = new Uint8Array(await request.arrayBuffer());
+      if (!body.length) return json({ error: "empty body" }, 400);
+      if (body.length > MEDIA_MAX_BYTES) return json({ error: "too large", max: MEDIA_MAX_BYTES }, 413);
+
+      const key = mediaKey(uid, extOf(type));
+      const name = (request.headers.get("x-media-name") || "").slice(0, 120);
+      await env.MEDIA.put(key, body, {
+        httpMetadata: { contentType: type, cacheControl: "public, max-age=31536000, immutable" },
+        customMetadata: { uid, name, at: String(Date.now()) },
+      });
+      return json({ key, url: `${url.origin}/media/${key}`, size: body.length, type, name });
+    }
+
+    // Выдача медиа: GET /media/<uid>/<random>.<ext> — ключ случайный, поэтому чужой не угадать.
+    if ((request.method === "GET" || request.method === "HEAD") && url.pathname.startsWith("/media/")) {
+      if (!env.MEDIA) return json({ error: "media storage not configured" }, 503);
+      const key = decodeURIComponent(url.pathname.slice("/media/".length));
+      if (!key || key.includes("..")) return json({ error: "bad key" }, 400);
+      const obj = await env.MEDIA.get(key, { range: request.headers, onlyIf: request.headers });
+      if (!obj) return new Response("not found", { status: 404, headers: CORS });
+      const headers = new Headers(CORS);
+      obj.writeHttpMetadata(headers);
+      headers.set("etag", obj.httpEtag);
+      headers.set("cache-control", "public, max-age=31536000, immutable");
+      if (obj.range) headers.set("content-range", `bytes ${obj.range.offset}-${obj.range.offset + obj.range.length - 1}/${obj.size}`);
+      headers.set("accept-ranges", "bytes");
+      const hasBody = "body" in obj && obj.body;
+      return new Response(request.method === "HEAD" || !hasBody ? null : obj.body, {
+        status: obj.range ? 206 : (hasBody ? 200 : 304),
+        headers,
+      });
+    }
+
     // Превью ссылок: GET /link-preview?url=... -> {url, title, desc, image}
     if (request.method === "GET" && url.pathname === "/link-preview") {
       try {

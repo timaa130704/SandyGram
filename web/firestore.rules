@@ -29,13 +29,34 @@ service cloud.firestore {
       allow get: if true;
     }
 
+    // Отложенная отправка: очередь читает и разносит push-worker по cron.
+    // Пользователь видит и правит только свои записи.
+    match /scheduled/{jobId} {
+      allow read, delete: if authed() && resource.data.uid == request.auth.uid;
+      allow create: if authed()
+        && request.resource.data.uid == request.auth.uid
+        && request.resource.data.chatId is string
+        && request.resource.data.sendAt is int
+        && request.resource.data.sendAt <= request.time.toMillis() + 31536000000
+        && request.resource.data.get('text', '').size() <= 4096;
+      allow update: if authed()
+        && resource.data.uid == request.auth.uid
+        && request.resource.data.uid == request.auth.uid;
+    }
+
     // Истории: живут 24 часа (чистит push-worker), чужие можно только «просмотреть»
     match /stories/{storyId} {
       allow read: if authed();
       allow create: if authed() && request.resource.data.uid == request.auth.uid;
+      // Просмотр/реакция: в картах views и reactions можно тронуть только СВОЙ ключ,
+      // чужие просмотры и реакции затирать нельзя.
       allow update: if authed()
-        && request.resource.data.diff(resource.data).affectedKeys().hasOnly(['views'])
-        && request.auth.uid in request.resource.data.views;
+        && request.resource.data.diff(resource.data).affectedKeys().hasOnly(['views', 'reactions'])
+        && request.auth.uid in request.resource.data.views
+        && request.resource.data.views.diff(resource.data.get('views', {}))
+             .affectedKeys().hasOnly([request.auth.uid])
+        && request.resource.data.get('reactions', {}).diff(resource.data.get('reactions', {}))
+             .affectedKeys().hasOnly([request.auth.uid]);
       allow delete: if authed() && resource.data.uid == request.auth.uid;
     }
 
@@ -83,10 +104,17 @@ service cloud.firestore {
             && request.resource.data.members.size() == resource.data.members.size() + 1
             && request.resource.data.diff(resource.data).affectedKeys().hasOnly(['members'])
             && !chatBanned())
+        // Исчезающие сообщения: таймер в ЛС/секретном чате ставит любой участник,
+        // в группе и канале — только админ (ветка ниже).
+        || (isMember(resource)
+            && resource.data.type != 'group' && resource.data.type != 'channel'
+            && request.resource.data.diff(resource.data).affectedKeys().hasOnly(['ttl', 'e2e'])
+            && (request.resource.data.get('ttl', null) == null || request.resource.data.ttl is int)
+            && (request.resource.data.get('e2e', null) == null || request.resource.data.e2e is bool))
         || (chatAdmin() && request.resource.data.diff(resource.data).affectedKeys().hasOnly([
             'lastRead', 'unread', 'pinnedBy', 'muted', 'typing', 'lastMessage', 'pinnedMessageId',
             'members', 'admins', 'mutes', 'bans', 'warns', 'title', 'avatar', 'avatarColor',
-            'inviteCode', 'generalClosed', 'topics'
+            'inviteCode', 'generalClosed', 'topics', 'ttl', 'e2e'
           ]));
       allow delete: if authed()
         && (resource.data.ownerUid == request.auth.uid
@@ -116,22 +144,101 @@ service cloud.firestore {
             && request.auth.uid in chatData().bans
             && chatData().bans[request.auth.uid] > request.time.toMillis();
         }
+        // Упоминания читает push-worker и рассылает пуши в обход «без звука»,
+        // поэтому тегать можно только реальных участников чата и не больше 20 за раз.
+        function mentionsOk() {
+          return !('mentions' in request.resource.data)
+            || (request.resource.data.mentions.size() <= 20
+                && chatData().members.hasAll(request.resource.data.mentions));
+        }
+        // Нельзя подделать время (иначе сообщение навсегда прилипает к низу чата)
+        // и нельзя прислать текст больше клиентского лимита.
+        function payloadOk() {
+          return request.resource.data.createdAt is int
+            && request.resource.data.createdAt <= request.time.toMillis() + 3600000
+            && request.resource.data.createdAt >= request.time.toMillis() - 86400000
+            && (!('text' in request.resource.data) || request.resource.data.text == null
+                || (request.resource.data.text is string && request.resource.data.text.size() <= 4096))
+            && (!('senderName' in request.resource.data) || request.resource.data.senderName == null
+                || (request.resource.data.senderName is string && request.resource.data.senderName.size() <= 64))
+            && mediaOk() && encOk()
+            && (!('expiresAt' in request.resource.data) || request.resource.data.expiresAt == null
+                || request.resource.data.expiresAt is int);
+        }
+        // Секретные чаты: сервер видит только конверты enc[uid] = {n, c}.
+        // Правила лишь ограничивают размер — прочитать содержимое нельзя ни нам, ни Google.
+        function encOk() {
+          return !('enc' in request.resource.data)
+            || (request.resource.data.enc.keys().hasOnly(chatData().members)
+                && request.resource.data.enc.keys().size() <= 8);
+        }
+        // Медиа 3.0: в документе только ссылка на R2 нашего воркера, а не произвольный URL,
+        // иначе через ленту чата можно было бы раздавать чужие адреса и трекеры.
+        function mediaOk() {
+          return !('media' in request.resource.data)
+            || (request.resource.data.media.url is string
+                && request.resource.data.media.url.matches('https://[a-z0-9.-]*workers[.]dev/media/.*')
+                && request.resource.data.media.url.size() <= 512
+                && request.resource.data.media.get('size', 0) is int
+                && request.resource.data.media.get('size', 0) <= 26214400
+                && request.resource.data.media.get('name', '').size() <= 200);
+        }
         allow read: if authed() && request.auth.uid in chatData().members;
         allow create: if authed()
           && request.auth.uid in chatData().members
           && request.resource.data.sender == request.auth.uid
           && (chatData().type != 'channel' || amChatAdmin())
           && (chatData().type != 'private' || !blockedByRecipient())
+          && mentionsOk() && payloadOk()
           && !msgMuted() && !msgBanned();
-        // Правка/реакции/голоса/удаление: автор, либо админ, либо участник меняет только reactions/poll
-        allow update, delete: if authed()
+        // Реакция: участник трогает не больше двух эмодзи-ключей (снял свою — поставил другую),
+        // остальные реакции затереть одним апдейтом нельзя.
+        function reactionOk() {
+          return request.resource.data.diff(resource.data).affectedKeys().hasOnly(['reactions'])
+            && request.resource.data.reactions.diff(resource.data.get('reactions', {}))
+                 .affectedKeys().size() <= 2
+            && request.resource.data.reactions.keys().size() <= 24;
+        }
+        // Голос в опросе: вопрос и варианты неизменны, а в votes меняется только своя запись.
+        function pollVoteOk() {
+          return request.resource.data.diff(resource.data).affectedKeys().hasOnly(['poll'])
+            && request.resource.data.poll.question == resource.data.poll.question
+            && request.resource.data.poll.options == resource.data.poll.options
+            && request.resource.data.poll.get('votes', {}).diff(resource.data.poll.get('votes', {}))
+                 .affectedKeys().hasOnly([request.auth.uid]);
+        }
+        // Ход в мини-игре: играть могут только двое, чьи uid записаны в game.players.
+        function gameMoveOk() {
+          return request.resource.data.diff(resource.data).affectedKeys().hasOnly(['game'])
+            && request.auth.uid in resource.data.game.players
+            && request.resource.data.game.players == resource.data.game.players
+            // ходить можно только в свою очередь и только в незакрытой игре
+            && resource.data.game.turn == request.auth.uid
+            && resource.data.game.get('winner', null) == null;
+        }
+        // Одноразовое сообщение: получатель отмечает ТОЛЬКО свой просмотр,
+        // чужие отметки затирать нельзя, содержимое не меняется.
+        function viewOnceOk() {
+          return request.resource.data.diff(resource.data).affectedKeys().hasOnly(['viewedBy'])
+            && resource.data.get('viewOnce', false) == true
+            && request.resource.data.viewedBy.diff(resource.data.get('viewedBy', {}))
+                 .affectedKeys().hasOnly([request.auth.uid]);
+        }
+        // Правка/реакции/голоса/ходы: автор, либо админ, либо ограниченный апдейт участника.
+        // Автор и админ тоже не могут переписать время и подменить автора сообщения.
+        allow update: if authed()
           && request.auth.uid in chatData().members
+          && request.resource.data.createdAt == resource.data.createdAt
+          && request.resource.data.sender == resource.data.sender
           && (resource.data.sender == request.auth.uid
               || amChatAdmin()
-              || request.resource.data.diff(resource.data).affectedKeys().hasOnly(['reactions'])
-              || (request.resource.data.diff(resource.data).affectedKeys().hasOnly(['poll'])
-                  && request.resource.data.poll.question == resource.data.poll.question
-                  && request.resource.data.poll.options == resource.data.poll.options));
+              || reactionOk()
+              || pollVoteOk()
+              || gameMoveOk()
+              || viewOnceOk());
+        allow delete: if authed()
+          && request.auth.uid in chatData().members
+          && (resource.data.sender == request.auth.uid || amChatAdmin());
       }
     }
   }

@@ -154,6 +154,7 @@
             <span>Скачать для Android<small>APK · бесплатно · ~146 МБ</small></span>
           </a>
           <a class="btn-ghost" href="https://github.com/timaa130704/SandyGram/releases/latest/download/SandyGram.exe">Скачать для Windows</a>
+          <button type="button" class="btn-ghost" onclick="sgSoon()">Скачать для Linux</button>
           <a class="btn-ghost" href="https://sandygram-a3b42.web.app" target="_blank">Открыть в браузере</a>
         </div>
         <p class="hero-note">Android 7.0+ · аккаунт общий с веб-версией</p>
@@ -218,5 +219,29 @@
       SandyGram · <a href="https://sandygram-a3b42.web.app" target="_blank">веб-версия</a> · <a href="https://github.com/timaa130704/SandyGram" target="_blank">GitHub</a> · сделано в монохроме
     </footer>
   </div>
-</body>
+    <div id="sg-soon" role="status" aria-live="polite"></div>
+    <style>
+      button.btn-ghost { font: inherit; cursor: pointer; }
+      #sg-soon {
+        position: fixed; left: 50%; bottom: 32px; transform: translate(-50%, 24px);
+        background: #111; color: #fff; border: 1px solid #333; border-radius: 14px;
+        padding: 14px 22px; font-size: 15px; font-weight: 600; letter-spacing: .2px;
+        box-shadow: 0 12px 40px #0009; opacity: 0; pointer-events: none;
+        transition: opacity .25s ease, transform .25s ease; z-index: 9999; max-width: 90vw;
+      }
+      #sg-soon.show { opacity: 1; transform: translate(-50%, 0); }
+    </style>
+    <script>
+      (function () {
+        var t;
+        window.sgSoon = function () {
+          var el = document.getElementById("sg-soon");
+          el.textContent = "🐧 Версия для Linux скоро — уже в пути!";
+          el.classList.add("show");
+          clearTimeout(t);
+          t = setTimeout(function () { el.classList.remove("show"); }, 3200);
+        };
+      })();
+    </script>
+  </body>
 </html>

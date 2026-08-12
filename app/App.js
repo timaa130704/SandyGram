@@ -9,6 +9,7 @@ import {
 import { SafeAreaView, SafeAreaProvider } from "react-native-safe-area-context";
 import { StatusBar } from "expo-status-bar";
 import * as ImagePicker from "expo-image-picker";
+import * as DocumentPicker from "expo-document-picker";
 import * as Clipboard from "expo-clipboard";
 import { useAudioRecorder, RecordingPresets, AudioModule, setAudioModeAsync, createAudioPlayer } from "expo-audio";
 import * as FileSystem from "expo-file-system/legacy";
@@ -18,6 +19,13 @@ import { useFonts } from "expo-font";
 import { MaterialIcons } from "@expo/vector-icons";
 import AsyncStorage from "@react-native-async-storage/async-storage";
 import { auth, db, rtdb } from "./fire";
+// Общая логика 3.0 (медиа в R2, исчезающие, папки, мини-игра) — копия web/public/sg30.js
+import {
+  uploadMedia, fmtBytes, mediaKind, MEDIA_MAX_BYTES,
+  TTL_OPTIONS, ttlLabel, ttlLeft, isExpired,
+  foldersWithCounts, chatsInFolder, newTttGame, tttMove, tttMark,
+} from "./sg30";
+import { ensureKeyPair, sealForMembers, openForMe, fingerprint } from "./sge2e";
 import { ref as dbRef, onValue, onChildAdded, set as dbSet, update as dbUpdate, push as dbPush, remove as dbRemove } from "firebase/database";
 import { CameraView, useCameraPermissions } from "expo-camera";
 import * as SecureStore from "expo-secure-store";
@@ -50,10 +58,17 @@ const THEMES = {
 };
 const AVATAR_TONES = ["#f3edff", "#e8ddfd", "#dccffb", "#cfc0f8", "#c2b1f4", "#b5a2f0", "#a893ec"];
 const ONLINE_WINDOW = 70e3;
+// Ключи сквозного шифрования: приватный лежит в expo-secure-store (Keystore Android),
+// публичный публикуется в users/{uid}.e2ePub. Модульная переменная — чтобы был доступ из всех экранов.
+let myKeys = null;
+const e2eStorage = {
+  get: (k) => SecureStore.getItemAsync(k).catch(() => null),
+  set: (k, v) => (v ? SecureStore.setItemAsync(k, v) : SecureStore.deleteItemAsync(k)).catch(() => { }),
+};
 const QUICK_REACTIONS = ["❤️", "👍", "🔥", "😂", "😮", "😢"];
 const SITE = "https://sandygram-a3b42.web.app";
 const LINK_WORKER = "https://sandygram-push.sandygram.workers.dev";
-const APP_VERSION = "2.5.1";
+const APP_VERSION = "3.0.0";
 const APK_URL = "https://github.com/timaa130704/SandyGram/releases/latest/download/SandyGram.apk";
 // Сигнальная шина RTDB — для мгновенного realtime у ПК-клиента
 const RTDB = "https://sandygram-a3b42-default-rtdb.europe-west1.firebasedatabase.app";
@@ -471,6 +486,20 @@ function SandyGram() {
     return unsub;
   }, [me?.uid]);
 
+  // ---- ключи сквозного шифрования ----
+  useEffect(() => {
+    if (!me?.uid) return;
+    (async () => {
+      try {
+        myKeys = await ensureKeyPair(e2eStorage);
+        if (me.e2ePub !== myKeys.pub) {
+          await updateDoc(doc(db, "users", me.uid), { e2ePub: myKeys.pub });
+          setMe(prev => (prev ? { ...prev, e2ePub: myKeys.pub } : prev));
+        }
+      } catch { myKeys = null; }
+    })();
+  }, [me?.uid]);
+
   // ---- приватные настройки (чёрный список) ----
   useEffect(() => {
     if (!me?.uid) return;
@@ -771,7 +800,16 @@ function PickNameScreen({ ctx, pending, onDone }) {
 
 // ================================================================ СПИСОК ЧАТОВ
 function ListScreen({ ctx }) {
-  const { T, me, chats, viewOf, setScreen, stories } = ctx;
+  const { T, me, chats, viewOf, setScreen, stories, myPrefs, setMyPrefs } = ctx;
+  const [activeFolder, setActiveFolder] = useState("all");
+  const [folderPick, setFolderPick] = useState(null); // чат, который раскладываем по папкам
+  const [newFolderFor, setNewFolderFor] = useState(null);
+  const folders = myPrefs.folders || [];
+  const saveFolders = async (next) => {
+    setMyPrefs({ ...myPrefs, folders: next });
+    try { await setDoc(doc(db, "users", me.uid, "private", "prefs"), { folders: next }, { merge: true }); }
+    catch (e) { Alert.alert("Ошибка", ruError(e)); }
+  };
   const [storyViewUid, setStoryViewUid] = useState(null);
   const publishStory = async () => {
     try {
@@ -831,7 +869,7 @@ function ListScreen({ ctx }) {
     [chats, viewOf]);
   const shown = search.trim()
     ? views.filter(v => (v.title || "").toLowerCase().includes(search.trim().toLowerCase()))
-    : views;
+    : chatsInFolder(folders, activeFolder, views);
 
   const typingCount = (chat) => Object.entries(chat.typing || {}).filter(([uid, t]) => uid !== me.uid && Date.now() - t < 3000).length;
   const preview = (v) => {
@@ -845,6 +883,7 @@ function ListScreen({ ctx }) {
     { label: v.pinned ? "📌  Открепить" : "📌  Закрепить", onPress: () => updateDoc(doc(db, "chats", v.id), { pinnedBy: v.pinned ? arrayRemove(me.uid) : arrayUnion(me.uid) }).catch(() => { }) },
     { label: v.muted ? "🔔  Включить звук" : "🔇  Без звука", onPress: () => updateDoc(doc(db, "chats", v.id), { muted: v.muted ? arrayRemove(me.uid) : arrayUnion(me.uid) }).catch(() => { }) },
     { label: "✓  Прочитано", onPress: () => updateDoc(doc(db, "chats", v.id), { [`lastRead.${me.uid}`]: Date.now(), [`unread.${me.uid}`]: 0 }).catch(() => { }) },
+    { label: "🗂  В папку…", onPress: () => setFolderPick(v) },
     {
       label: "🧹  Очистить историю", onPress: () => {
         Alert.alert("Очистить историю?", "Удалятся сообщения, которые вы вправе удалять.", [
@@ -922,6 +961,25 @@ function ListScreen({ ctx }) {
             );
           }} />
       </View>
+      {folders.length > 0 && !search.trim() && (
+        <ScrollView horizontal showsHorizontalScrollIndicator={false}
+          contentContainerStyle={{ gap: 6, paddingHorizontal: 10, paddingBottom: 6 }}>
+          {foldersWithCounts(folders, views, (c) => c.unread || 0).map(f => (
+            <TouchableOpacity key={f.id} onPress={() => setActiveFolder(f.id)}
+              style={{
+                paddingHorizontal: 12, paddingVertical: 6, borderRadius: 999,
+                backgroundColor: f.id === activeFolder ? T.inverse : T.surface2, flexDirection: "row", alignItems: "center", gap: 5,
+              }}>
+              <Text style={{ color: f.id === activeFolder ? T.onInverse : T.muted, fontSize: 12.5, fontWeight: "600" }}>
+                {f.icon || "🗂"} {f.name}
+              </Text>
+              {f.count > 0 && (
+                <Text style={{ color: f.id === activeFolder ? T.onInverse : T.text, fontSize: 11, fontWeight: "700" }}>{f.count}</Text>
+              )}
+            </TouchableOpacity>
+          ))}
+        </ScrollView>
+      )}
       <FlatList
         data={shown}
         keyExtractor={v => v.id}
@@ -969,6 +1027,37 @@ function ListScreen({ ctx }) {
       </TouchableOpacity>
       {settingsOpen && <SettingsSheet ctx={ctx} onClose={() => setSettingsOpen(false)} />}
       {newChatOpen && <NewChatSheet ctx={ctx} onClose={() => setNewChatOpen(false)} />}
+      {folderPick && (
+        <ActionSheet T={T} onClose={() => setFolderPick(null)}
+          header={<Text style={{ color: T.muted, fontWeight: "700", padding: 8 }}>Папки для «{folderPick.title}»</Text>}
+          items={[
+            ...folders.map(f => ({
+              label: `${f.icon || "🗂"}  ${f.name}${(f.chatIds || []).includes(folderPick.id) ? "  ✓" : ""}`,
+              onPress: () => saveFolders(folders.map(x => {
+                if (x.id !== f.id) return x;
+                const ids = new Set(x.chatIds || []);
+                ids.has(folderPick.id) ? ids.delete(folderPick.id) : ids.add(folderPick.id);
+                return { ...x, chatIds: [...ids] };
+              })),
+            })),
+            {
+              label: "＋  Новая папка",
+              onPress: () => setNewFolderFor(folderPick),
+            },
+          ]} />
+      )}
+      {newFolderFor && (
+        <PromptModal T={T} title="Новая папка" submitLabel="Создать"
+          fields={[{ key: "name", placeholder: "Работа" }]}
+          onClose={() => setNewFolderFor(null)}
+          onSubmit={async (v) => {
+            const name = (v.name || "").trim().slice(0, 24);
+            if (!name) return Alert.alert("", "Введите название");
+            if (folders.length >= 10) return Alert.alert("", "Больше 10 папок не нужно");
+            await saveFolders([...folders, { id: `f${Date.now()}`, name, icon: "🗂", chatIds: [newFolderFor.id] }]);
+            setNewFolderFor(null);
+          }} />
+      )}
       {menuChat && <ActionSheet T={T} items={chatMenuItems(menuChat)} onClose={() => setMenuChat(null)}
         header={<Text style={{ color: T.muted, fontWeight: "700", padding: 8 }}>{menuChat.title}</Text>} />}
       {storyViewUid && <StoryViewer ctx={ctx} uid={storyViewUid} onClose={() => setStoryViewUid(null)} onAdd={publishStory} />}
@@ -1439,6 +1528,11 @@ function ChatScreen({ ctx, chatId }) {
   const [text, setText] = useState("");
   const [topic, setTopic] = useState(null);
   const [replyTo, setReplyTo] = useState(null);
+  const [uploadPct, setUploadPct] = useState(null); // прогресс загрузки вложения в R2
+  const [peerKeys, setPeerKeys] = useState({}); // uid -> публичный ключ, для расшифровки
+  const [e2eOpen, setE2eOpen] = useState(false);
+  const [ttlOpen, setTtlOpen] = useState(false); // выбор таймера исчезающих
+  const [schedOpen, setSchedOpen] = useState(false); // отложенная отправка
   const [editTarget, setEditTarget] = useState(null);
   const [menuMsg, setMenuMsg] = useState(null);
   const [forwardMsg, setForwardMsg] = useState(null);
@@ -1551,10 +1645,11 @@ function ChatScreen({ ctx, chatId }) {
   const canWrite = (chat.type !== "channel" || isAdmin) && (!isForum || (topic && (!currentClosed || isAdmin)));
   const pinnedMsg = chat.pinnedMessageId ? messages.find(m => m.id === chat.pinnedMessageId && !m.deleted) : null;
 
-  const visible = messages.filter(m => !m.deleted && (!isForum || !topic || (m.topicId || "general") === topic.id));
+  // Просроченные исчезающие и просмотренные одноразовые прячем сразу — сервер добьёт позже
+  const visible = messages.filter(m => !m.deleted && !isExpired(m) && (!isForum || !topic || (m.topicId || "general") === topic.id));
 
   // ---------- операции ----------
-  const sendTo = async (targetChat, { textBody = "", image = null, sticker = null, voice = null, poll = null, forwardedFrom = null }) => {
+  const sendTo = async (targetChat, { textBody = "", image = null, sticker = null, voice = null, poll = null, media = null, game = null, viewOnce = false, forwardedFrom = null }) => {
     const msg = {
       sender: me.uid, senderName: me.displayName || me.username,
       text: textBody.slice(0, 4000), image, createdAt: Date.now(), reactions: {},
@@ -1563,7 +1658,22 @@ function ChatScreen({ ctx, chatId }) {
     if (sticker) msg.sticker = sticker;
     if (voice) msg.voice = voice;
     if (poll) msg.poll = poll;
+    if (media) msg.media = media;
+    if (game) msg.game = game;
+    if (viewOnce) { msg.viewOnce = true; msg.viewedBy = {}; }
+    // Исчезающие сообщения: таймер чата задаёт срок жизни, добивает push-worker
+    if (targetChat.ttl > 0) msg.expiresAt = msg.createdAt + targetChat.ttl;
     if (forwardedFrom) msg.forwardedFrom = forwardedFrom;
+    // Секретный чат: в базу уходят только конверты enc[uid], plaintext остаётся на устройстве
+    if (targetChat.e2e && msg.text) {
+      if (!myKeys) throw new Error("Нет ключа шифрования на этом устройстве");
+      const pubs = {};
+      for (const uid of targetChat.members) {
+        pubs[uid] = uid === me.uid ? myKeys.pub : (await fetchUser(uid))?.e2ePub || null;
+      }
+      msg.enc = sealForMembers(targetChat.members, pubs, myKeys.secret, msg.text);
+      msg.text = "";
+    }
     if (!forwardedFrom && targetChat.id === chatId && replyTo) msg.replyTo = { id: replyTo.id, sender: replyTo.senderName, text: replyTo.text ? replyTo.text.slice(0, 120) : "📷 Фото" };
     if (textBody) {
       const map = await memberUsernameMapRef.current;
@@ -1581,9 +1691,14 @@ function ChatScreen({ ctx, chatId }) {
         if (p && p.title) msg.preview = { url: clean, title: p.title, desc: p.desc || "", image: p.image || "" };
       } catch { /* превью не критично */ }
     }
-    const previewText = msg.text || (sticker ? "🧩 Стикер" : voice ? "🎤 Голосовое сообщение" : poll ? "📊 Опрос" : "");
+    const mediaPreview = media
+      ? (media.kind === "video" ? "🎬 Видео" : media.kind === "audio" ? "🎵 Аудио" : media.kind === "image" ? "🖼 Изображение" : `📎 ${media.name || "Файл"}`)
+      : "";
+    const previewText = (targetChat.e2e ? "🔒 Секретное сообщение" : msg.text)
+      || (sticker ? "🧩 Стикер" : voice ? "🎤 Голосовое сообщение" : poll ? "📊 Опрос"
+          : game ? "🎮 Крестики-нолики" : mediaPreview);
     const patch = {
-      lastMessage: { text: previewText, senderUid: me.uid, senderName: msg.senderName, createdAt: msg.createdAt, hasImage: !!image },
+      lastMessage: { text: previewText, senderUid: me.uid, senderName: msg.senderName, createdAt: msg.createdAt, hasImage: !!image || media?.kind === "image" },
       [`lastRead.${me.uid}`]: msg.createdAt, [`unread.${me.uid}`]: 0, [`typing.${me.uid}`]: 0,
     };
     for (const m of targetChat.members) if (m !== me.uid) patch[`unread.${m}`] = increment(1);
@@ -1637,12 +1752,46 @@ function ChatScreen({ ctx, chatId }) {
       else Alert.alert("Ошибка", ruError(e));
     } finally { sendingRef.current = false; }
   };
-  const pickPhoto = async () => {
-    const res = await ImagePicker.launchImageLibraryAsync({ mediaTypes: ["images"], quality: 0.5, base64: true, allowsEditing: false });
-    if (res.canceled || !res.assets?.[0]?.base64) return;
-    const dataUrl = `data:image/jpeg;base64,${res.assets[0].base64}`;
-    if (dataUrl.length > 900_000) return Alert.alert("Ошибка", "Фото слишком большое — выберите поменьше");
-    try { await sendTo(chat, { image: dataUrl }); setReplyTo(null); } catch (e) { Alert.alert("Ошибка", ruError(e)); }
+  // Вложения 3.0: фото/видео/файлы уезжают в R2 через воркер, а не base64 в документ
+  const uploadAndSend = async (file, viewOnce = false) => {
+    if (file.size > MEDIA_MAX_BYTES) return Alert.alert("Слишком большой файл", `Максимум ${fmtBytes(MEDIA_MAX_BYTES)}`);
+    setUploadPct(0);
+    try {
+      const media = await uploadMedia(LINK_WORKER, () => auth.currentUser.getIdToken(), file, { onProgress: setUploadPct });
+      await sendTo(chat, { media, viewOnce });
+      setReplyTo(null);
+    } catch (e) { Alert.alert("Ошибка", e?.message || ruError(e)); }
+    finally { setUploadPct(null); }
+  };
+  // RN не знает про File — заворачиваем локальный uri в blob для uploadMedia
+  const assetToFile = async (uri, name, type) => {
+    const blob = await (await fetch(uri)).blob();
+    return { blob, name, type: blob.type || type, size: blob.size || 0 };
+  };
+  const pickPhoto = async (viewOnce = false) => {
+    const res = await ImagePicker.launchImageLibraryAsync({ mediaTypes: ["images", "videos"], quality: 0.85, allowsEditing: false });
+    const a = res.assets?.[0];
+    if (res.canceled || !a) return;
+    const isVideo = a.type === "video" || /\.(mp4|mov|webm|mkv)$/i.test(a.uri || "");
+    const name = a.fileName || (isVideo ? `video-${Date.now()}.mp4` : `photo-${Date.now()}.jpg`);
+    const type = a.mimeType || (isVideo ? "video/mp4" : "image/jpeg");
+    let uri = a.uri;
+    // фото пережимаем, видео отправляем как есть
+    if (!isVideo) {
+      try {
+        const ctx = ImageManipulator.manipulate(uri).resize({ width: 2048 });
+        const img = await ctx.renderAsync();
+        const out = await img.saveAsync({ compress: 0.85, format: "jpeg" });
+        if (out?.uri) uri = out.uri;
+      } catch { /* не вышло — отправим оригинал */ }
+    }
+    await uploadAndSend(await assetToFile(uri, name, type), viewOnce);
+  };
+  const pickFile = async () => {
+    const res = await DocumentPicker.getDocumentAsync({ copyToCacheDirectory: true, type: "*/*" });
+    const a = res.assets?.[0];
+    if (res.canceled || !a) return;
+    await uploadAndSend(await assetToFile(a.uri, a.name || "file", a.mimeType || "application/octet-stream"));
   };
   const onChangeText = (val) => {
     setText(val);
@@ -1708,6 +1857,45 @@ function ChatScreen({ ctx, chatId }) {
       patch[`reactions.${emoji}`] = arrayUnion(me.uid);
     }
     await updateDoc(ref, patch).catch(() => { });
+  };
+  // Мини-игра: ход проверяется общей логикой sg30, правила Firestore дублируют проверку
+  // Расшифровка секретного сообщения: приватный ключ есть только на этом устройстве
+  const decryptMessage = (m) => {
+    if (!myKeys) return "🔒 Зашифровано (нет ключа на этом устройстве)";
+    const senderPub = m.sender === me.uid ? myKeys.pub : (peerKeys[m.sender] || null);
+    if (!senderPub) return "🔒 Зашифровано";
+    const text = openForMe(m, me.uid, senderPub, myKeys.secret);
+    return text === null ? "🔒 Не удалось расшифровать (ключ другого устройства)" : text;
+  };
+  // Одноразовое: открываем на весь экран и сразу помечаем просмотр — больше его не увидит никто
+  const revealViewOnce = async (m) => {
+    const url = m.media?.url || m.image;
+    if (url) setPhotoView(url);
+    else if (m.text) Alert.alert("Одноразовое сообщение", m.text);
+    try { await updateDoc(doc(db, "chats", chatId, "messages", m.id), { [`viewedBy.${me.uid}`]: Date.now() }); }
+    catch (e) { Alert.alert("Ошибка", ruError(e)); }
+  };
+  // Публичные ключи участников нужны и для шифрования, и для расшифровки входящих
+  useEffect(() => {
+    if (!chat?.members) return;
+    let alive = true;
+    (async () => {
+      const out = {};
+      for (const uid of chat.members) {
+        if (uid === me.uid) continue;
+        const u = await fetchUser(uid).catch(() => null);
+        if (u?.e2ePub) out[uid] = u.e2ePub;
+      }
+      if (alive) setPeerKeys(out);
+    })();
+    return () => { alive = false; };
+  }, [chatId, (chat?.members || []).join(",")]);
+
+  const playTtt = async (m, cell) => {
+    const next = tttMove(m.game, me.uid, cell);
+    if (typeof next === "string") return Alert.alert("", next);
+    try { await updateDoc(doc(db, "chats", chatId, "messages", m.id), { game: next }); }
+    catch (e) { Alert.alert("Ошибка", ruError(e)); }
   };
   const votePoll = async (m, optionId) => {
     const cur = m.poll?.votes?.[me.uid];
@@ -1995,12 +2183,15 @@ function ChatScreen({ ctx, chatId }) {
             ) : (
               <MessageBubble T={T} m={item.m} mine={item.m.sender === me.uid} meUid={me.uid}
                 group={chat.type === "group"} lastReadByOthers={lastReadByOthers} saved={chat.type === "saved"}
-                onLongPress={() => setMenuMsg(item.m)} onPhoto={() => setPhotoView(item.m.image)}
+                onLongPress={() => setMenuMsg(item.m)} onPhoto={(url) => setPhotoView(url || item.m.image)}
                 onDoubleTap={() => toggleReaction(item.m, "❤️")}
                 onSwipeReply={() => { setEditTarget(null); setReplyTo(item.m); }}
                 onMention={openDmByName}
                 onInvite={joinByCode}
                 onVote={(m, o) => votePoll(m, o)}
+                onGameMove={(m, cell) => playTtt(m, cell)}
+                onReveal={(m) => revealViewOnce(m)}
+                decrypt={decryptMessage}
                 onQuotePress={() => item.m.replyTo && scrollToMessage(item.m.replyTo.id)} />
             )}
             ListEmptyComponent={<View style={{ transform: [{ scaleY: -1 }], alignItems: "center", marginTop: 40 }}><Text style={{ color: T.muted }}>Пока пусто — напишите первое сообщение</Text></View>}
@@ -2014,6 +2205,14 @@ function ChatScreen({ ctx, chatId }) {
               <TouchableOpacity onPress={() => { if (editTarget) setText(""); setReplyTo(null); setEditTarget(null); }}>
                 <MaterialIcons name="close" size={20} color={T.muted} />
               </TouchableOpacity>
+            </View>
+          )}
+          {uploadPct !== null && (
+            <View style={{ backgroundColor: T.surface, paddingHorizontal: 14, paddingVertical: 8 }}>
+              <Text style={{ color: T.muted, fontSize: 12, marginBottom: 5 }}>Загрузка вложения… {Math.round(uploadPct * 100)}%</Text>
+              <View style={{ height: 4, borderRadius: 4, backgroundColor: T.surface2, overflow: "hidden" }}>
+                <View style={{ height: 4, width: `${Math.round(uploadPct * 100)}%`, backgroundColor: T.inverse }} />
+              </View>
             </View>
           )}
           {mentionList.length > 0 && (
@@ -2135,10 +2334,86 @@ function ChatScreen({ ctx, chatId }) {
         </Modal>
       )}
 
+      {e2eOpen && (
+        <ActionSheet T={T} onClose={() => setE2eOpen(false)}
+          header={
+            <View style={{ padding: 12, paddingTop: 4, gap: 6 }}>
+              <Text style={{ color: T.text, fontWeight: "700", fontSize: 15 }}>Секретный чат</Text>
+              <Text style={{ color: T.muted, fontSize: 12.5 }}>
+                Шифрование на устройстве (X25519 + XSalsa20-Poly1305). Сервер и база видят только шифротекст.
+                Приватный ключ не покидает телефон — на другом устройстве старые сообщения не откроются.
+              </Text>
+              <Text style={{ color: T.muted, fontSize: 12 }}>Ваш отпечаток: {fingerprint(myKeys?.pub)}</Text>
+              <Text style={{ color: T.muted, fontSize: 12 }}>
+                Отпечаток собеседника: {(() => {
+                  const peer = (chat.members || []).find(u => u !== me.uid);
+                  return peerKeys[peer] ? fingerprint(peerKeys[peer]) : "ключа ещё нет";
+                })()}
+              </Text>
+            </View>
+          }
+          items={[{
+            label: chat.e2e ? "🔓  Выключить шифрование" : "🔒  Включить шифрование",
+            onPress: async () => {
+              const peer = (chat.members || []).find(u => u !== me.uid);
+              if (!chat.e2e && !peerKeys[peer]) return Alert.alert("", "Собеседник ещё не заходил в 3.0 — ключа нет");
+              try { await updateDoc(doc(db, "chats", chat.id), { e2e: !chat.e2e }); }
+              catch (e) { Alert.alert("Ошибка", ruError(e)); }
+            },
+          }]} />
+      )}
+      {ttlOpen && (
+        <ActionSheet T={T} onClose={() => setTtlOpen(false)}
+          header={<Text style={{ color: T.muted, fontSize: 12.5, padding: 12, paddingTop: 4 }}>
+            Новые сообщения будут удаляться сами. Уже отправленные не тронем.</Text>}
+          items={TTL_OPTIONS.map(o => ({
+            label: `${o.ms ? "🔥" : "✖"}  ${o.label}${(chat?.ttl || 0) === o.ms ? "  ✓" : ""}`,
+            onPress: async () => {
+              if ((chat.type === "group" || chat.type === "channel") && !isAdmin) return Alert.alert("", "Таймер в группе меняет только админ");
+              try { await updateDoc(doc(db, "chats", chat.id), { ttl: o.ms || null }); }
+              catch (e) { Alert.alert("Ошибка", ruError(e)); }
+            },
+          }))} />
+      )}
+      {schedOpen && (
+        <PromptModal T={T} title="Отложенная отправка" submitLabel="Запланировать"
+          fields={[
+            { key: "text", placeholder: "Что отправить?", value: text },
+            { key: "mins", placeholder: "Через сколько минут (например 60)", value: "60" },
+          ]}
+          onClose={() => setSchedOpen(false)}
+          onSubmit={async (v) => {
+            const body = (v.text || "").trim();
+            const mins = Math.round(Number(v.mins) || 0);
+            if (!body) return Alert.alert("", "Введите текст");
+            if (!(mins >= 1)) return Alert.alert("", "Минимум одна минута");
+            try {
+              await setDoc(doc(collection(db, "scheduled")), {
+                uid: me.uid, chatId: chat.id, text: body, sendAt: Date.now() + mins * 60e3,
+                createdAt: Date.now(), senderName: me.displayName || me.username, topicId: topic?.id || "general",
+              });
+              setSchedOpen(false); setText("");
+              Alert.alert("", `Отправим через ${mins} мин — можно закрыть приложение`);
+            } catch (e) { Alert.alert("Ошибка", ruError(e)); }
+          }} />
+      )}
       {attachOpen && (
         <ActionSheet T={T} onClose={() => setAttachOpen(false)} items={[
-          { label: "📷  Фото", onPress: pickPhoto },
+          { label: "📷  Фото или видео", onPress: () => pickPhoto(false) },
+          { label: "📎  Файл", onPress: pickFile },
+          { label: "👁  Одноразовое фото", onPress: () => pickPhoto(true) },
           { label: "📊  Опрос", onPress: () => setPollOpen(true) },
+          { label: "⏰  Отложенная отправка", onPress: () => setSchedOpen(true) },
+          { label: `🔥  Исчезающие: ${ttlLabel(chat?.ttl || 0)}`, onPress: () => setTtlOpen(true) },
+          ...(chat?.type === "private" ? [{ label: chat.e2e ? "🔒  Секретный чат: вкл" : "🔓  Включить шифрование", onPress: () => setE2eOpen(true) }] : []),
+          ...(chat?.type === "private" ? [{
+            label: "🎮  Крестики-нолики",
+            onPress: async () => {
+              const peer = (chat.members || []).find(u => u !== me.uid);
+              if (!peer) return;
+              try { await sendTo(chat, { game: newTttGame(me.uid, peer) }); } catch (e) { Alert.alert("Ошибка", ruError(e)); }
+            },
+          }] : []),
         ]} />
       )}
       {pollOpen && (
@@ -2198,8 +2473,59 @@ function ChatScreen({ ctx, chatId }) {
 }
 
 // ---------- пузырь сообщения (свайп вправо = ответить) ----------
-function MessageBubble({ T, m, mine, meUid, group, lastReadByOthers, saved, onLongPress, onPhoto, onDoubleTap, onSwipeReply, onMention, onInvite, onQuotePress, onVote }) {
+// Медиа 3.0: файл лежит в R2, показываем превью или карточку
+function MediaBubble({ T, m, mine, onPhoto }) {
+  const md = m.media || {};
+  const fg = mine ? T.onInverse : T.text;
+  if (md.kind === "image") {
+    return (
+      <TouchableOpacity onPress={() => onPhoto && onPhoto(md.url)}>
+        <Image source={{ uri: md.url }} style={{ width: 220, height: 220, borderRadius: 12, marginBottom: m.text ? 6 : 0 }} resizeMode="cover" />
+      </TouchableOpacity>
+    );
+  }
+  const icon = md.kind === "video" ? "▶" : md.kind === "audio" ? "🎵" : "📎";
+  return (
+    <TouchableOpacity onPress={() => Linking.openURL(md.url)}
+      style={{ flexDirection: "row", alignItems: "center", gap: 10, paddingVertical: 6, minWidth: 190 }}>
+      <Text style={{ fontSize: 20, color: fg }}>{icon}</Text>
+      <View style={{ flex: 1 }}>
+        <Text numberOfLines={1} style={{ color: fg, fontSize: 13.5, fontWeight: "700" }}>{md.name || (md.kind === "video" ? "Видео" : "Файл")}</Text>
+        <Text style={{ color: mine ? T.onInverse : T.muted, fontSize: 11.5, opacity: 0.85 }}>{fmtBytes(md.size)}</Text>
+      </View>
+    </TouchableOpacity>
+  );
+}
+
+// Мини-игра: крестики-нолики прямо в пузыре
+function TttBubble({ T, m, mine, meUid, onMove }) {
+  const g = m.game || {};
+  const fg = mine ? T.onInverse : T.text;
+  const status = g.winner === "draw" ? "Ничья"
+    : g.winner ? (g.winner === meUid ? "Вы победили 🎉" : "Соперник победил")
+    : g.turn === meUid ? `Ваш ход (${tttMark(g, meUid)})` : "Ход соперника";
+  return (
+    <View style={{ marginVertical: 4 }}>
+      <View style={{ flexDirection: "row", flexWrap: "wrap", width: 3 * 46 }}>
+        {[...(g.board || "---------")].map((c, i) => (
+          <TouchableOpacity key={i} disabled={c !== "-" || !!g.winner} onPress={() => onMove && onMove(m, i)}
+            style={{
+              width: 44, height: 44, margin: 1, borderRadius: 8, alignItems: "center", justifyContent: "center",
+              backgroundColor: (g.line || []).includes(i) ? T.inverse : (mine ? T.onInverse + "22" : T.surface2),
+            }}>
+            <Text style={{ fontSize: 22, fontWeight: "800", color: (g.line || []).includes(i) ? T.onInverse : fg }}>{c === "-" ? "" : c}</Text>
+          </TouchableOpacity>
+        ))}
+      </View>
+      <Text style={{ color: mine ? T.onInverse : T.muted, fontSize: 11.5, marginTop: 5 }}>{status}</Text>
+    </View>
+  );
+}
+
+function MessageBubble({ T, m, mine, meUid, group, lastReadByOthers, saved, onLongPress, onPhoto, onDoubleTap, onSwipeReply, onMention, onInvite, onQuotePress, onVote, onGameMove, onReveal, decrypt }) {
   const lastTap = useRef(0);
+  // В секретном чате текста в документе нет — расшифровываем на месте
+  const bodyText = m.enc ? (decrypt ? decrypt(m) : "🔒 Зашифровано") : m.text;
   const read = mine && lastReadByOthers >= m.createdAt;
   const pan = useRef(new Animated.Value(0)).current;
   const responder = useRef(PanResponder.create({
@@ -2240,6 +2566,13 @@ function MessageBubble({ T, m, mine, meUid, group, lastReadByOthers, saved, onLo
               <Text numberOfLines={1} style={{ color: mine ? T.onInverse : T.muted, fontSize: 12.5 }}>{m.replyTo.text}</Text>
             </TouchableOpacity>
           )}
+          {m.viewOnce && !mine && !(m.viewedBy || {})[meUid] ? (
+            <TouchableOpacity onPress={() => onReveal && onReveal(m)}
+              style={{ flexDirection: "row", alignItems: "center", gap: 8, paddingVertical: 10, minWidth: 180 }}>
+              <Text style={{ fontSize: 18 }}>👁</Text>
+              <Text style={{ color: mine ? T.onInverse : T.text, fontSize: 14 }}>Одноразовое — нажмите, чтобы открыть</Text>
+            </TouchableOpacity>
+          ) : (<>
           {m.image && (
             <TouchableOpacity onPress={onPhoto}>
               <Image source={{ uri: m.image }} style={{ width: 220, height: 220, borderRadius: 12, marginBottom: m.text ? 6 : 0 }} resizeMode="cover" />
@@ -2281,8 +2614,11 @@ function MessageBubble({ T, m, mine, meUid, group, lastReadByOthers, saved, onLo
             </View>
           )}
           {m.voice && <VoiceBubble T={T} m={m} mine={mine} />}
-          {!!m.text && (
-            <MentionText text={m.text} onMention={onMention} onInvite={onInvite}
+          {m.media && <MediaBubble T={T} m={m} mine={mine} onPhoto={onPhoto} />}
+          {m.game && <TttBubble T={T} m={m} mine={mine} meUid={meUid} onMove={onGameMove} />}
+          </>)}
+          {!!bodyText && !(m.viewOnce && !mine && !(m.viewedBy || {})[meUid]) && (
+            <MentionText text={bodyText} onMention={onMention} onInvite={onInvite}
               style={{ color: mine ? T.onInverse : T.text, fontSize: 15.5 }}
               mentionStyle={{ fontWeight: "700", textDecorationLine: "underline" }}
               linkStyle={{ color: mine ? T.onInverse : T.inverse, textDecorationLine: "underline", fontWeight: "600" }} />

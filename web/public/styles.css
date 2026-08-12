@@ -653,3 +653,54 @@ input, textarea { font: inherit; color: inherit; background: none; border: 0; ou
 .message { animation: msg-in .18s ease; }
 @keyframes msg-in { from { opacity: 0; transform: translateY(6px); } to { opacity: 1; transform: none; } }
 .meta, .notice .meta { letter-spacing: .01em; }
+
+/* ================= SandyGram 3.0 ================= */
+
+/* Загрузка файла в R2: полоска прогресса над полем ввода */
+.upload-bar { display: flex; align-items: center; gap: 8px; padding: 6px 12px; font-size: 12px; color: var(--text-muted); background: var(--surface-2); border-top: 1px solid var(--surface-2); }
+.upload-bar .up-name { flex: 0 1 auto; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; max-width: 40%; }
+.upload-bar .up-track { flex: 1; height: 4px; border-radius: 4px; background: var(--surface-3); overflow: hidden; }
+.upload-bar .up-track i { display: block; height: 100%; width: 0; background: var(--inverse); transition: width .15s linear; }
+.upload-bar .up-pct { flex: 0 0 auto; font-variant-numeric: tabular-nums; }
+.conversation-inner.drag-over { outline: 2px dashed var(--inverse); outline-offset: -6px; }
+
+/* Медиа из R2 */
+.bubble video.video-msg { max-width: 100%; width: 320px; max-height: 60vh; border-radius: 12px; display: block; margin: 2px 0 4px; background: #000; }
+.file-card { display: flex; align-items: center; gap: 10px; margin: 4px 0; padding: 8px 10px; border-radius: var(--radius-m); background: var(--surface-2); text-decoration: none; color: inherit; }
+.file-card:hover { filter: brightness(1.08); }
+.file-card .fc-icon { font-size: 20px; }
+.file-card .fc-body { display: flex; flex-direction: column; min-width: 0; }
+.file-card .fc-body strong { font-size: 13px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; max-width: 220px; }
+.file-card .fc-body em { font-size: 11px; font-style: normal; color: var(--text-muted); }
+
+/* Исчезающие и одноразовые сообщения */
+.ttl-badge { margin-right: 6px; font-size: 11px; opacity: .8; }
+.message.view-once-hidden .bubble { cursor: pointer; }
+.message.view-once-hidden .bubble > .msg-text,
+.message.view-once-hidden .bubble > img,
+.message.view-once-hidden .bubble > video,
+.message.view-once-hidden .bubble > .file-card { filter: blur(14px); user-select: none; }
+
+/* Мини-игра: крестики-нолики */
+.ttt { margin: 4px 0 6px; }
+.ttt-board { display: grid; grid-template-columns: repeat(3, 44px); grid-gap: 3px; }
+.ttt-cell { width: 44px; height: 44px; font-size: 22px; font-weight: 700; border: none; border-radius: 8px; background: var(--surface-2); color: var(--text); cursor: pointer; }
+.ttt-cell:disabled { cursor: default; }
+.ttt-cell.win { background: var(--inverse); color: var(--on-inverse); }
+.ttt-status { display: block; margin-top: 5px; font-size: 11px; color: var(--text-muted); }
+
+/* Папки чатов */
+.folder-bar { display: flex; gap: 6px; overflow-x: auto; padding: 6px 10px; scrollbar-width: none; }
+.folder-bar::-webkit-scrollbar { display: none; }
+.folder-chip { flex: 0 0 auto; padding: 5px 11px; border: none; border-radius: 999px; background: var(--surface-2); color: var(--text-muted); font-size: 12px; cursor: pointer; white-space: nowrap; }
+.folder-chip.active { background: var(--inverse); color: var(--on-inverse); }
+.folder-chip .fc-count { margin-left: 5px; padding: 0 5px; border-radius: 999px; background: var(--inverse); color: var(--on-inverse); font-size: 10px; }
+
+/* Мелочи для новых модалок 3.0 */
+.modal-note { margin: -4px 0 10px; font-size: 12px; color: var(--text-muted); line-height: 1.4; }
+.row-tail { margin-left: auto; color: var(--inverse); }
+.settings-row.ttl-opt.active { background: var(--surface-3); }
+.sched-row { display: flex; align-items: center; gap: 8px; padding: 5px 2px; font-size: 12px; color: var(--text-muted); }
+.sched-row span { flex: 1; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.sched-row .sched-del { border: none; background: none; color: var(--text-muted); cursor: pointer; font-size: 13px; }
+#attachButton.view-once-armed { color: var(--inverse); }

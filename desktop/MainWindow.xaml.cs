@@ -1,4 +1,4 @@
-// SandyGram Desktop — нативный Windows-клиент (WPF), общий Firebase с сайтом и приложением
+﻿// SandyGram Desktop — нативный Windows-клиент (WPF), общий Firebase с сайтом и приложением
 using System;
 using System.Collections.Generic;
 using System.Diagnostics;
@@ -987,6 +987,10 @@ void QrBtn_Click(object sender, RoutedEventArgs e)
         foreach (var (id, m) in loadedMsgs.OrderBy(r => Fire.FLong(r.Fields, "createdAt")))
         {
             if (Fire.F(m, "deleted") is bool d && d) continue;
+            // 3.0: просроченные исчезающие и уже просмотренные одноразовые не показываем
+            var exp = Fire.FLong(m, "expiresAt");
+            if (exp > 0 && exp <= DateTimeOffset.UtcNow.ToUnixTimeMilliseconds()) continue;
+            if (Fire.F(m, "viewOnce") is bool vOnce && vOnce && Fire.FMap(m, "viewedBy").Count > 0) continue;
             if (forum)
             {
                 var mt = Fire.FStr(m, "topicId");
@@ -1078,7 +1082,54 @@ void QrBtn_Click(object sender, RoutedEventArgs e)
             stack.Children.Add(q);
         }
 
-        if (Fire.FStr(m, "image") is { Length: > 0 } imgSrc && TryImage(imgSrc) is { } bmp)
+        // 3.0: одноразовое сообщение — на Windows только предупреждение, открывать тут нельзя,
+        // иначе отметка о просмотре сгорит без показа содержимого пользователю.
+        var viewOnce = Fire.F(m, "viewOnce") is bool vo1 && vo1;
+        if (viewOnce)
+            stack.Children.Add(new TextBlock { Text = "👁 Одноразовое сообщение — откройте в телефоне или в браузере", FontSize = 12.5, Foreground = fg, TextWrapping = TextWrapping.Wrap, Margin = new Thickness(0, 2, 0, 4) });
+
+        // 3.0: медиа лежит в R2, показываем картинку либо карточку файла со ссылкой
+        var media = Fire.FMap(m, "media");
+        if (!viewOnce && media.Count > 0)
+        {
+            var mUrl = media.TryGetValue("url", out var mu) ? mu as string ?? "" : "";
+            var mKind = media.TryGetValue("kind", out var mk) ? mk as string ?? "file" : "file";
+            var mName = media.TryGetValue("name", out var mn) ? mn as string ?? "Файл" : "Файл";
+            var mSize = media.TryGetValue("size", out var ms) && ms is long sl ? sl : 0L;
+            if (mKind == "image" && TryImage(mUrl) is { } mediaImg)
+                stack.Children.Add(new Image { Source = mediaImg, MaxWidth = 320, MaxHeight = 320, Stretch = Stretch.Uniform, Margin = new Thickness(0, 2, 0, 4) });
+            else if (mUrl.Length > 0)
+            {
+                var icon = mKind == "video" ? "🎬" : mKind == "audio" ? "🎵" : "📎";
+                var sizeText = mSize > 0 ? $" · {(mSize < 1024 * 1024 ? $"{mSize / 1024} КБ" : $"{mSize / 1024.0 / 1024.0:0.#} МБ")}" : "";
+                var fb = new Button
+                {
+                    Style = (Style)FindResource(mine ? "GhostBtn" : "PrimaryBtn"),
+                    Content = $"{icon}  {mName}{sizeText}", FontSize = 12,
+                    Padding = new Thickness(12, 7, 12, 7), Margin = new Thickness(0, 2, 0, 4),
+                    HorizontalAlignment = HorizontalAlignment.Left,
+                };
+                    fb.Click += (_, _) => { try { Process.Start(new System.Diagnostics.ProcessStartInfo(mUrl) { UseShellExecute = true }); } catch { } };
+                stack.Children.Add(fb);
+            }
+        }
+
+        // 3.0: мини-игра — на Windows только счёт-заглушка, ходить можно в вебе и на телефоне
+        var game = Fire.FMap(m, "game");
+        if (game.Count > 0)
+        {
+            var board = game.TryGetValue("board", out var gb) ? gb as string ?? "---------" : "---------";
+            if (board.Length != 9) board = "---------"; // чужой формат — не падаем
+            var rows = new[] { board.Substring(0, 3), board.Substring(3, 3), board.Substring(6, 3) };
+            stack.Children.Add(new TextBlock
+            {
+                Text = "🎮 Крестики-нолики\n" + string.Join("\n", rows).Replace("-", "·"),
+                FontFamily = new FontFamily("Consolas"), FontSize = 15, Foreground = fg,
+                Margin = new Thickness(0, 2, 0, 4),
+            });
+        }
+
+        if (Fire.FStr(m, "image") is { Length: > 0 } imgSrc && !viewOnce && TryImage(imgSrc) is { } bmp)
             stack.Children.Add(new Image { Source = bmp, MaxWidth = 320, MaxHeight = 320, Stretch = Stretch.Uniform, Margin = new Thickness(0, 2, 0, 4) });
 
         if (Fire.FStr(m, "sticker") is { Length: > 0 } sticker && TryImage($"{Site}/stickers/{sticker}.png") is { } stImg)
@@ -1127,11 +1178,17 @@ void QrBtn_Click(object sender, RoutedEventArgs e)
             stack.Children.Add(pStack);
         }
 
-        if (Fire.FStr(m, "text") is { Length: > 0 } text)
+        // 3.0: секретный чат — расшифровать на Windows нельзя, ключей тут нет
+        if (Fire.FMap(m, "enc").Count > 0)
+            stack.Children.Add(MakeMessageText("🔒 Секретное сообщение — читается в приложении и в браузере", fg, mine));
+        else if (Fire.FStr(m, "text") is { Length: > 0 } text)
             stack.Children.Add(MakeMessageText(text, fg, mine));
 
         var created = Fire.FLong(m, "createdAt");
         var meta = DateTimeOffset.FromUnixTimeMilliseconds(created).ToLocalTime().ToString("HH:mm");
+        // 3.0: исчезающие сообщения — показываем, что у сообщения есть срок
+        var expiresAt = Fire.FLong(m, "expiresAt");
+        if (expiresAt > 0) meta = "🔥 " + meta;
         if (Fire.FLong(m, "editedAt") > 0) meta = "изм. " + meta;
         if (mine) meta += lastReadByOthers >= created ? "  ✓✓" : "  ✓";
         stack.Children.Add(new TextBlock { Text = meta, FontSize = 9.5, Foreground = fg, Opacity = 0.6, HorizontalAlignment = HorizontalAlignment.Right, Margin = new Thickness(0, 2, 0, 0) });

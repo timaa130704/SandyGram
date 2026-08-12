@@ -4,19 +4,32 @@
       "$token": {
         ".read": true,
         ".write": "!data.exists() || auth != null",
-        ".validate": "newData.hasChildren(['status'])"
+        ".validate": "newData.hasChildren(['status']) && newData.child('status').isString() && newData.child('status').val().length <= 16",
+        "refresh": { ".validate": "newData.isString() && newData.val().length <= 2048" },
+        "sealed": { ".validate": "newData.isString() && newData.val().length <= 4096" },
+        "nonce": { ".validate": "newData.isString() && newData.val().length <= 128" },
+        "pub": { ".validate": "newData.isString() && newData.val().length <= 128" },
+        "status": { ".validate": "newData.isString() && newData.val().length <= 16" },
+        "at": { ".validate": "newData.isNumber()" },
+        "created": { ".validate": "newData.isNumber()" },
+        "uid": { ".validate": "newData.isString() && newData.val().length <= 64" },
+        "$other": { ".validate": false }
       }
     },
     "bump": {
       ".read": "auth != null",
-      ".write": "auth != null"
+      "$chatId": {
+        ".write": "auth != null",
+        ".validate": "newData.isNumber() && newData.val() <= now + 60000 && newData.val() >= now - 300000"
+      }
     },
     "calls": {
       "$uid": {
         ".read": "auth != null && auth.uid === $uid",
         "$callId": {
           ".read": "auth != null && (auth.uid === $uid || auth.uid === data.child('from').val())",
-          ".write": "auth != null && ((!data.exists() && newData.child('from').val() === auth.uid) || auth.uid === $uid || auth.uid === data.child('from').val())"
+          ".write": "auth != null && ((!data.exists() && newData.child('from').val() === auth.uid) || auth.uid === $uid || auth.uid === data.child('from').val())",
+          "from": { ".validate": "newData.isString() && (!data.exists() || newData.val() === data.val())" }
         }
       }
     },
