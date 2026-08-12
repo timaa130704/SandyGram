@@ -783,7 +783,7 @@ void QrBtn_Click(object sender, RoutedEventArgs e)
         var rx = new System.Text.RegularExpressions.Regex(@"https?://[^\s<]+");
         foreach (System.Text.RegularExpressions.Match mm in rx.Matches(text))
         {
-            if (mm.Index > cursor) tb.Inlines.Add(new Run(text[cursor..mm.Index]));
+            if (mm.Index > cursor) AddStyledRuns(tb, text[cursor..mm.Index], fg);
             var u = System.Text.RegularExpressions.Regex.Replace(mm.Value, "[.,;:!?)]+$", "");
             var invite = System.Text.RegularExpressions.Regex.Match(u, @"^https?://(?:sandygram-a3b42\.web\.app|localhost(?::\d+)?)/join/([a-f0-9]{6,})$", System.Text.RegularExpressions.RegexOptions.IgnoreCase);
             var h = new Hyperlink { Foreground = linkBrush, TextDecorations = TextDecorations.Underline };
@@ -802,8 +802,38 @@ void QrBtn_Click(object sender, RoutedEventArgs e)
             tb.Inlines.Add(h);
             cursor = mm.Index + mm.Length;
         }
-        if (cursor < text.Length) tb.Inlines.Add(new Run(text[cursor..]));
+        if (cursor < text.Length) AddStyledRuns(tb, text[cursor..], fg);
         return tb;
+    }
+
+    // 3.0: разметка — ```блок```, `код`, ||спойлер||, **жирный**, *курсив*, ~~зачёркнутый~~.
+    // Текст остаётся текстом: собираем Run-ы, никакой разбор вёрстки здесь невозможен.
+    static readonly System.Text.RegularExpressions.Regex MdRx = new(
+        @"(```[\s\S]*?```|`[^`\n]+`|\|\|[\s\S]+?\|\||\*\*[^*\n]+\*\*|\*[^*\n]+\*|~~[^~\n]+~~)");
+    void AddStyledRuns(TextBlock tb, string s, Brush fg)
+    {
+        var pos = 0;
+        foreach (System.Text.RegularExpressions.Match m in MdRx.Matches(s))
+        {
+            if (m.Index > pos) tb.Inlines.Add(new Run(s[pos..m.Index]));
+            var tok = m.Value;
+            if (tok.StartsWith("```"))
+                tb.Inlines.Add(new Run(tok[3..^3].TrimStart('\r', '\n').TrimEnd()) { FontFamily = new FontFamily("Consolas") });
+            else if (tok.StartsWith("||"))
+            {
+                // спойлер: замазан цветом текста, открывается кликом и обратно не закрывается
+                var inner = new Run(tok[2..^2]) { Background = fg, Foreground = fg };
+                var link = new Hyperlink(inner) { TextDecorations = null, Foreground = fg, ToolTip = "Нажмите, чтобы показать" };
+                link.Click += (_, _) => { inner.Background = null; inner.Foreground = fg; };
+                tb.Inlines.Add(link);
+            }
+            else if (tok.StartsWith("**")) tb.Inlines.Add(new Run(tok[2..^2]) { FontWeight = FontWeights.Bold });
+            else if (tok.StartsWith("~~")) tb.Inlines.Add(new Run(tok[2..^2]) { TextDecorations = TextDecorations.Strikethrough });
+            else if (tok.StartsWith("`")) tb.Inlines.Add(new Run(tok[1..^1]) { FontFamily = new FontFamily("Consolas") });
+            else tb.Inlines.Add(new Run(tok[1..^1]) { FontStyle = FontStyles.Italic });
+            pos = m.Index + m.Length;
+        }
+        if (pos < s.Length) tb.Inlines.Add(new Run(s[pos..]));
     }
 
     async Task JoinInviteAsync(string code)
@@ -1129,6 +1159,20 @@ void QrBtn_Click(object sender, RoutedEventArgs e)
             });
         }
 
+        // 3.0: бросок кубика — результат считает отправитель, мы только показываем
+        var dice = Fire.FMap(m, "dice");
+        if (dice.Count > 0)
+        {
+            var val = dice.TryGetValue("value", out var dv) ? Convert.ToString(dv) : "?";
+            var sides = dice.TryGetValue("sides", out var ds) ? Convert.ToString(ds) : "6";
+            stack.Children.Add(new TextBlock
+            {
+                Text = $"🎲 {val}  (из {sides})",
+                FontSize = 20, FontWeight = FontWeights.Bold, Foreground = fg,
+                Margin = new Thickness(0, 2, 0, 4),
+            });
+        }
+
         if (Fire.FStr(m, "image") is { Length: > 0 } imgSrc && !viewOnce && TryImage(imgSrc) is { } bmp)
             stack.Children.Add(new Image { Source = bmp, MaxWidth = 320, MaxHeight = 320, Stretch = Stretch.Uniform, Margin = new Thickness(0, 2, 0, 4) });
 
@@ -1237,6 +1281,17 @@ void QrBtn_Click(object sender, RoutedEventArgs e)
             mi.Click += (_, _) => _ = ToggleReactionAsync(msgId2, em);
             menu.Items.Add(mi);
         }
+        // 3.0: остальные реакции — подменю, чтобы не раздувать основное меню
+        var miMore = new MenuItem { Header = "😀 Другая реакция" };
+        foreach (var emoji in new[] { "👎", "😮", "😢", "😡", "🎉", "🙏", "👏", "💯", "🤔", "🤯", "🥳", "😍",
+                                      "😎", "🤡", "💩", "👀", "💪", "🤝", "✅", "❌", "⚡", "🏆", "🤣", "🫡" })
+        {
+            var mi = new MenuItem { Header = emoji };
+            var em = emoji;
+            mi.Click += (_, _) => _ = ToggleReactionAsync(msgId2, em);
+            miMore.Items.Add(mi);
+        }
+        menu.Items.Add(miMore);
         var isAdminNow = chats.TryGetValue(currentChatId, out var cf2) &&
             (Fire.FStr(cf2, "ownerUid") == Fire.Uid || Fire.FList(cf2, "admins").Any(a => a as string == Fire.Uid));
         if (mine || isAdminNow)

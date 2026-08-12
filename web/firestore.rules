@@ -161,9 +161,21 @@ service cloud.firestore {
                 || (request.resource.data.text is string && request.resource.data.text.size() <= 4096))
             && (!('senderName' in request.resource.data) || request.resource.data.senderName == null
                 || (request.resource.data.senderName is string && request.resource.data.senderName.size() <= 64))
-            && mediaOk() && encOk()
+            && mediaOk() && encOk() && diceOk()
+            && (!('silent' in request.resource.data) || request.resource.data.silent is bool)
             && (!('expiresAt' in request.resource.data) || request.resource.data.expiresAt == null
                 || request.resource.data.expiresAt is int);
+        }
+        // Кубик: результат нельзя дописать «на глазок» — только целое в пределах граней.
+        function diceOk() {
+          return !('dice' in request.resource.data)
+            || (request.resource.data.dice.value is int
+                && request.resource.data.dice.sides is int
+                && request.resource.data.dice.sides >= 2
+                && request.resource.data.dice.sides <= 1000
+                && request.resource.data.dice.value >= 1
+                && request.resource.data.dice.value <= request.resource.data.dice.sides
+                && request.resource.data.dice.keys().hasOnly(['value', 'sides']));
         }
         // Секретные чаты: сервер видит только конверты enc[uid] = {n, c}.
         // Правила лишь ограничивают размер — прочитать содержимое нельзя ни нам, ни Google.

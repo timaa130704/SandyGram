@@ -704,3 +704,44 @@ input, textarea { font: inherit; color: inherit; background: none; border: 0; ou
 .sched-row span { flex: 1; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .sched-row .sched-del { border: none; background: none; color: var(--text-muted); cursor: pointer; font-size: 13px; }
 #attachButton.view-once-armed { color: var(--inverse); }
+
+/* ---------- 3.0: разметка текста, реакции, кубик ---------- */
+/* Спойлер: замазан «шумом», открывается кликом и обратно не закрывается */
+.spoiler {
+  background: var(--surface-3); color: transparent; border-radius: 4px;
+  cursor: pointer; user-select: none; text-shadow: 0 0 8px var(--text-muted);
+  transition: color .18s ease, background .18s ease, text-shadow .18s ease;
+}
+.spoiler.open { background: transparent; color: inherit; text-shadow: none; cursor: text; user-select: text; }
+.msg-text code {
+  font-family: ui-monospace, "SF Mono", Consolas, monospace; font-size: .92em;
+  background: var(--surface-3); padding: 1px 5px; border-radius: 5px;
+}
+.code-block { position: relative; margin: 6px 0; }
+.code-block pre {
+  margin: 0; padding: 9px 11px; overflow-x: auto; background: var(--surface-3);
+  border-radius: var(--radius-m); font-family: ui-monospace, "SF Mono", Consolas, monospace;
+  font-size: 12px; line-height: 1.45; white-space: pre; color: var(--text);
+}
+.code-copy {
+  position: absolute; top: 5px; right: 5px; border: none; border-radius: 6px;
+  background: var(--surface); color: var(--text-muted); cursor: pointer;
+  padding: 2px 7px; font-size: 12px; opacity: 0; transition: opacity .15s ease;
+}
+.code-block:hover .code-copy { opacity: 1; }
+/* Полный эмодзи-пикер реакций */
+.react-picker { display: grid; grid-template-columns: repeat(8, 1fr); gap: 4px; max-height: 260px; overflow-y: auto; margin-bottom: 10px; }
+.react-pick { border: none; border-radius: 8px; background: var(--surface-2); font-size: 20px; padding: 6px 0; cursor: pointer; }
+.react-pick:hover { background: var(--surface-3); }
+.react-row button[data-act="react-more"] { font-weight: 700; color: var(--text-muted); }
+/* Кубик */
+.dice-msg { display: inline-flex; align-items: baseline; gap: 6px; font-size: 26px; line-height: 1.2; }
+.dice-msg b { font-size: 26px; }
+.dice-msg small { font-size: 11px; color: var(--text-muted); }
+/* Комментарий к пересылке */
+.fwd-comment {
+  width: 100%; margin: 8px 0 0; padding: 8px 10px; box-sizing: border-box; resize: vertical;
+  background: var(--surface-2); color: var(--text); border: 1px solid var(--outline);
+  border-radius: var(--radius-m); font: inherit; font-size: 13px;
+}
+#sendButton.silent-armed { color: var(--text-muted); }

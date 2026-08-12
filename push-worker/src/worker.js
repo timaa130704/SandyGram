@@ -208,6 +208,7 @@ async function tick(env) {
     const recent = await listMessages(H, chat.id);
     for (const m of recent) {
       if ((m.createdAt || 0) <= lastRun || !Array.isArray(m.mentions)) continue;
+      if (m.silent === true) continue; // «без звука» глушит и уведомление об упоминании
       for (const uid of m.mentions) {
         if (!uid || uid === m.sender || mentioned.has(uid)) continue;
         const user = await getUser(uid);
@@ -221,6 +222,7 @@ async function tick(env) {
 
     const lm = chat.lastMessage || {};
     if ((lm.createdAt || 0) <= lastRun) continue;
+    if (lm.silent === true) continue; // отправлено «без звука» — пуш не шлём
     for (const uid of chat.members || []) {
       if (uid === lm.senderUid) continue;
       if (mentioned.has(uid)) continue; // уже уведомили об упоминании

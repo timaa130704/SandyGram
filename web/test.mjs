@@ -312,6 +312,34 @@ await expectDenied("enc envelope for outsider denied", () =>
     sender: uidOwner, senderName: "fowner", createdAt: Date.now(), reactions: {}, topicId: "general",
     enc: { [uidGuest2]: { n: "bm9uY2U=", c: "Y2lwaGVy" } } }));
 
+// Кубик: значение обязано лежать в пределах граней, лишних полей нет
+await setDoc(doc(collection(owner.db, "chats", gid, "messages")), {
+  sender: uidOwner, senderName: "fowner", createdAt: Date.now(), reactions: {}, topicId: "general",
+  dice: { value: 6, sides: 6 } });
+check("honest dice allowed", true);
+await expectDenied("dice above sides denied", () =>
+  setDoc(doc(collection(owner.db, "chats", gid, "messages")), {
+    sender: uidOwner, senderName: "fowner", createdAt: Date.now(), reactions: {}, topicId: "general",
+    dice: { value: 42, sides: 6 } }));
+await expectDenied("dice with extra field denied", () =>
+  setDoc(doc(collection(owner.db, "chats", gid, "messages")), {
+    sender: uidOwner, senderName: "fowner", createdAt: Date.now(), reactions: {}, topicId: "general",
+    dice: { value: 3, sides: 6, payload: "x".repeat(500) } }));
+await expectDenied("non-int dice denied", () =>
+  setDoc(doc(collection(owner.db, "chats", gid, "messages")), {
+    sender: uidOwner, senderName: "fowner", createdAt: Date.now(), reactions: {}, topicId: "general",
+    dice: { value: "6", sides: 6 } }));
+
+// Тихая отправка: это просто bool, строку туда не положить
+await setDoc(doc(collection(owner.db, "chats", gid, "messages")), {
+  sender: uidOwner, senderName: "fowner", createdAt: Date.now(), reactions: {}, topicId: "general",
+  text: "тихо", silent: true });
+check("silent message allowed", true);
+await expectDenied("non-bool silent denied", () =>
+  setDoc(doc(collection(owner.db, "chats", gid, "messages")), {
+    sender: uidOwner, senderName: "fowner", createdAt: Date.now(), reactions: {}, topicId: "general",
+    text: "тихо", silent: "yes" }));
+
 console.log(results.join("\n"));
 console.log(results.some(r => r.startsWith("FAIL")) ? "\n=== ЕСТЬ ОШИБКИ ===" : "\n=== ВСЕ ТЕСТЫ ПРОШЛИ ===");
 process.exit(0);

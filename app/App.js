@@ -30,6 +30,7 @@ import { ref as dbRef, onValue, onChildAdded, set as dbSet, update as dbUpdate, 
 import { CameraView, useCameraPermissions } from "expo-camera";
 import * as SecureStore from "expo-secure-store";
 import * as LocalAuthentication from "expo-local-authentication";
+import * as Crypto from "expo-crypto";
 import { RTCPeerConnection, RTCView, mediaDevices } from "react-native-webrtc";
 import {
   createUserWithEmailAndPassword, signInWithEmailAndPassword, signOut, onAuthStateChanged,
@@ -66,6 +67,12 @@ const e2eStorage = {
   set: (k, v) => (v ? SecureStore.setItemAsync(k, v) : SecureStore.deleteItemAsync(k)).catch(() => { }),
 };
 const QUICK_REACTIONS = ["❤️", "👍", "🔥", "😂", "😮", "😢"];
+// Полный набор для пикера реакций (правила разрешают до 24 разных эмодзи на сообщение)
+const ALL_REACTIONS = [
+  "❤️", "👍", "👎", "🔥", "😂", "😮", "😢", "😡", "🎉", "🙏", "👏", "💯",
+  "🤔", "🤯", "🥳", "🥺", "😍", "😎", "🤡", "💩", "👀", "💪", "🤝", "✍️",
+  "✅", "❌", "⚡", "🌚", "🍓", "🍾", "🏆", "🎯", "🤣", "😴", "🫡", "🙈",
+];
 const SITE = "https://sandygram-a3b42.web.app";
 const LINK_WORKER = "https://sandygram-push.sandygram.workers.dev";
 const APP_VERSION = "3.0.0";
@@ -208,8 +215,42 @@ function PromptModal({ T, title, fields, submitLabel = "Сохранить", onS
   );
 }
 
-// Текст с кликабельными @упоминаниями
-function MentionText({ text, style, mentionStyle, linkStyle, onMention, onInvite }) {
+// Спойлер: замазан цветом фона, открывается тапом и обратно не закрывается
+function Spoiler({ T, children }) {
+  const [open, setOpen] = useState(false);
+  return (
+    <Text onPress={() => setOpen(true)}
+      style={open ? null : { backgroundColor: T?.muted || "#888", color: "transparent" }}>
+      {children}
+    </Text>
+  );
+}
+// Разметка внутри обычного текста: ```блок```, `код`, ||спойлер||,
+// **жирный**, *курсив*, ~~зачёркнутый~~. В RN нет HTML, поэтому каждый
+// фрагмент — вложенный <Text> со своим стилем; вставить чужую вёрстку нельзя.
+const MD_RE = /(```[\s\S]*?```|`[^`\n]+`|\|\|[\s\S]+?\|\||\*\*[^*\n]+\*\*|\*[^*\n]+\*|~~[^~\n]+~~)/g;
+function mdSegments(str, T, keyBase) {
+  const out = [];
+  let last = 0, m;
+  MD_RE.lastIndex = 0;
+  while ((m = MD_RE.exec(str))) {
+    if (m.index > last) out.push(str.slice(last, m.index));
+    const tok = m[0];
+    const k = `${keyBase}-${m.index}`;
+    if (tok.startsWith("```")) out.push(<Text key={k} style={{ fontFamily: "monospace", fontSize: 13.5 }}>{tok.slice(3, -3).replace(/^\r?\n/, "").replace(/\s+$/, "")}</Text>);
+    else if (tok.startsWith("`")) out.push(<Text key={k} style={{ fontFamily: "monospace" }}>{tok.slice(1, -1)}</Text>);
+    else if (tok.startsWith("||")) out.push(<Spoiler key={k} T={T}>{tok.slice(2, -2)}</Spoiler>);
+    else if (tok.startsWith("**")) out.push(<Text key={k} style={{ fontWeight: "800" }}>{tok.slice(2, -2)}</Text>);
+    else if (tok.startsWith("~~")) out.push(<Text key={k} style={{ textDecorationLine: "line-through" }}>{tok.slice(2, -2)}</Text>);
+    else out.push(<Text key={k} style={{ fontStyle: "italic" }}>{tok.slice(1, -1)}</Text>);
+    last = m.index + tok.length;
+  }
+  if (last < str.length) out.push(str.slice(last));
+  return out;
+}
+
+// Текст с кликабельными @упоминаниями и разметкой
+function MentionText({ text, style, mentionStyle, linkStyle, onMention, onInvite, T }) {
   const nodes = [];
   const urlRE = /https?:\/\/[^\s<]+/gi;
   const plain = [];
@@ -224,7 +265,7 @@ function MentionText({ text, style, mentionStyle, linkStyle, onMention, onInvite
       last = start + m[2].length + 1;
     }
     if (last < s.length) plain.push(s.slice(last));
-    if (plain.length) { nodes.push(<Text key={`s${nodes.length}`}>{plain.join("")}</Text>); plain.length = 0; }
+    if (plain.length) { nodes.push(<Text key={`s${nodes.length}`}>{mdSegments(plain.join(""), T, `md${nodes.length}`)}</Text>); plain.length = 0; }
   };
   let lastText = 0, mu;
   while ((mu = urlRE.exec(text))) {
@@ -1536,6 +1577,9 @@ function ChatScreen({ ctx, chatId }) {
   const [editTarget, setEditTarget] = useState(null);
   const [menuMsg, setMenuMsg] = useState(null);
   const [forwardMsg, setForwardMsg] = useState(null);
+  const [forwardNote, setForwardNote] = useState("");   // комментарий к пересылке
+  const [reactPick, setReactPick] = useState(null);     // сообщение для полного эмодзи-пикера
+  const [nextSilent, setNextSilent] = useState(false);  // следующее сообщение — без пуша
   const [forwardSel, setForwardSel] = useState(new Set());
   const [photoView, setPhotoView] = useState(null);
   const [infoOpen, setInfoOpen] = useState(false);
@@ -1649,7 +1693,7 @@ function ChatScreen({ ctx, chatId }) {
   const visible = messages.filter(m => !m.deleted && !isExpired(m) && (!isForum || !topic || (m.topicId || "general") === topic.id));
 
   // ---------- операции ----------
-  const sendTo = async (targetChat, { textBody = "", image = null, sticker = null, voice = null, poll = null, media = null, game = null, viewOnce = false, forwardedFrom = null }) => {
+  const sendTo = async (targetChat, { textBody = "", image = null, sticker = null, voice = null, poll = null, media = null, game = null, dice = null, silent = false, viewOnce = false, forwardedFrom = null }) => {
     const msg = {
       sender: me.uid, senderName: me.displayName || me.username,
       text: textBody.slice(0, 4000), image, createdAt: Date.now(), reactions: {},
@@ -1660,6 +1704,9 @@ function ChatScreen({ ctx, chatId }) {
     if (poll) msg.poll = poll;
     if (media) msg.media = media;
     if (game) msg.game = game;
+    if (dice) msg.dice = dice;
+    // «без звука»: воркер видит флаг и не шлёт пуш — ни обычный, ни по упоминанию
+    if (silent) msg.silent = true;
     if (viewOnce) { msg.viewOnce = true; msg.viewedBy = {}; }
     // Исчезающие сообщения: таймер чата задаёт срок жизни, добивает push-worker
     if (targetChat.ttl > 0) msg.expiresAt = msg.createdAt + targetChat.ttl;
@@ -1696,9 +1743,10 @@ function ChatScreen({ ctx, chatId }) {
       : "";
     const previewText = (targetChat.e2e ? "🔒 Секретное сообщение" : msg.text)
       || (sticker ? "🧩 Стикер" : voice ? "🎤 Голосовое сообщение" : poll ? "📊 Опрос"
-          : game ? "🎮 Крестики-нолики" : mediaPreview);
+          : game ? "🎮 Крестики-нолики" : dice ? `🎲 ${dice.value}` : mediaPreview);
     const patch = {
-      lastMessage: { text: previewText, senderUid: me.uid, senderName: msg.senderName, createdAt: msg.createdAt, hasImage: !!image || media?.kind === "image" },
+      // silent живёт и в lastMessage: воркер решает про пуш по нему, не читая сообщения
+      lastMessage: { text: previewText, senderUid: me.uid, senderName: msg.senderName, createdAt: msg.createdAt, hasImage: !!image || media?.kind === "image", silent: !!silent },
       [`lastRead.${me.uid}`]: msg.createdAt, [`unread.${me.uid}`]: 0, [`typing.${me.uid}`]: 0,
     };
     for (const m of targetChat.members) if (m !== me.uid) patch[`unread.${m}`] = increment(1);
@@ -1715,14 +1763,29 @@ function ChatScreen({ ctx, chatId }) {
     if (c === "info") { setInfoOpen(true); return true; }
     if (c === "theme") { const t = (rest[0] || "").toLowerCase(); if (t === "dark" || t === "light") ctx.setTheme(t); else ctx.toggleTheme(); return true; }
     if (c === "saved") { const sv = [...chats.values()].find(v => v.type === "saved"); if (sv) setScreen({ name: "chat", chatId: sv.id }); else Alert.alert("", "Нет «Избранного»"); return true; }
-    if (c === "help") { Alert.alert("Команды", "/info\n/theme [dark|light]\n/saved\n/help\n/mute /warn /ban"); return true; }
+    if (c === "help") { Alert.alert("Команды", "/info\n/theme [dark|light]\n/saved\n/dice [граней]\n/help\n/mute /warn /ban"); return true; }
+    // /dice [граней] — честный бросок на системном ГПСЧ, не Math.random
+    if (c === "dice" || c === "roll") {
+      const sides = Math.min(1000, Math.max(2, parseInt(rest[0], 10) || 6));
+      // отбрасываем хвост диапазона, иначе младшие значения выпадают чаще
+      const limit = Math.floor(4294967296 / sides) * sides;
+      let n;
+      do {
+        const b = Crypto.getRandomBytes(4);
+        n = ((b[0] << 24) | (b[1] << 16) | (b[2] << 8) | b[3]) >>> 0;
+      } while (n >= limit);
+      await sendTo(chat, { dice: { value: (n % sides) + 1, sides } });
+      setReplyTo(null);
+      listRef.current?.scrollToOffset({ offset: 0, animated: true });
+      return true;
+    }
     return false;
   };
   const submit = async () => {
     const body = text.trim();
     if (!body || sendingRef.current) return;
     // слэш-команды: модерация + служебные
-    if (/^\/(mute|warn|ban|unmute|unban|info|theme|help|saved)\b/i.test(body)) {
+    if (/^\/(mute|warn|ban|unmute|unban|info|theme|help|saved|dice|roll)\b/i.test(body)) {
       sendingRef.current = true;
       try {
         const handled = await handleSlash(body);
@@ -1742,7 +1805,8 @@ function ChatScreen({ ctx, chatId }) {
         if (chat.lastMessage?.createdAt === editTarget.createdAt) await updateDoc(doc(db, "chats", chatId), { "lastMessage.text": body.slice(0, 4000) });
         setEditTarget(null);
       } else {
-        await sendTo(chat, { textBody: body });
+        await sendTo(chat, { textBody: body, silent: nextSilent });
+        setNextSilent(false);
         listRef.current?.scrollToOffset({ offset: 0, animated: true });
       }
       setReplyTo(null);
@@ -2235,8 +2299,11 @@ function ChatScreen({ ctx, chatId }) {
               <TouchableOpacity onPress={toggleRec} style={{ padding: 10 }}>
                 <MaterialIcons name={recording ? "stop-circle" : "mic"} size={23} color={recording ? T.danger : T.muted} />
               </TouchableOpacity>
-              <TouchableOpacity onPress={submit} style={{ width: 44, height: 44, borderRadius: 22, backgroundColor: T.inverse, alignItems: "center", justifyContent: "center" }}>
-                <MaterialIcons name={editTarget ? "check" : "send"} size={20} color={T.onInverse} />
+              {/* Долгое нажатие — отправить без пуша, не будя собеседника */}
+              <TouchableOpacity onPress={submit}
+                onLongPress={() => { setNextSilent(v => !v); Alert.alert("", nextSilent ? "Обычная отправка" : "Следующее сообщение — без звука 🔕"); }}
+                style={{ width: 44, height: 44, borderRadius: 22, backgroundColor: nextSilent ? T.surface2 : T.inverse, borderWidth: nextSilent ? 1.5 : 0, borderColor: T.inverse, alignItems: "center", justifyContent: "center" }}>
+                <MaterialIcons name={editTarget ? "check" : nextSilent ? "notifications-off" : "send"} size={20} color={nextSilent ? T.text : T.onInverse} />
               </TouchableOpacity>
             </View>
           ) : (
@@ -2258,6 +2325,9 @@ function ChatScreen({ ctx, chatId }) {
                     <Text style={{ fontSize: 26 }}>{e}</Text>
                   </TouchableOpacity>
                 ))}
+                <TouchableOpacity onPress={() => { const m = menuMsg; setMenuMsg(null); setReactPick(m); }}>
+                  <Text style={{ fontSize: 24, color: T.muted }}>＋</Text>
+                </TouchableOpacity>
               </View>
               {msgMenuItems(menuMsg).map((it, i) => (
                 <TouchableOpacity key={i} style={st.row} onPress={() => { setMenuMsg(null); it.onPress(); }}>
@@ -2269,10 +2339,31 @@ function ChatScreen({ ctx, chatId }) {
         </Modal>
       )}
 
+      {/* полный пикер реакций */}
+      {reactPick && (
+        <Modal transparent animationType="fade" onRequestClose={() => setReactPick(null)}>
+          <TouchableOpacity activeOpacity={1} onPress={() => setReactPick(null)} style={{ flex: 1, backgroundColor: "#0006", justifyContent: "center", padding: 24 }}>
+            <View style={{ backgroundColor: T.surface, borderRadius: 22, padding: 12, maxHeight: 340 }}>
+              <Text style={{ color: T.muted, fontSize: 13, marginBottom: 8 }}>Выберите реакцию</Text>
+              <ScrollView>
+                <View style={{ flexDirection: "row", flexWrap: "wrap" }}>
+                  {ALL_REACTIONS.map(e => (
+                    <TouchableOpacity key={e} onPress={() => { const m = reactPick; setReactPick(null); toggleReaction(m, e); }}
+                      style={{ width: "12.5%", alignItems: "center", paddingVertical: 7 }}>
+                      <Text style={{ fontSize: 25 }}>{e}</Text>
+                    </TouchableOpacity>
+                  ))}
+                </View>
+              </ScrollView>
+            </View>
+          </TouchableOpacity>
+        </Modal>
+      )}
+
       {/* пересылка (мультивыбор) */}
       {forwardMsg && (
-        <Modal transparent animationType="slide" onRequestClose={() => { setForwardMsg(null); setForwardSel(new Set()); }}>
-          <TouchableOpacity activeOpacity={1} onPress={() => { setForwardMsg(null); setForwardSel(new Set()); }} style={{ flex: 1, backgroundColor: "#0008" }} />
+        <Modal transparent animationType="slide" onRequestClose={() => { setForwardMsg(null); setForwardSel(new Set()); setForwardNote(""); }}>
+          <TouchableOpacity activeOpacity={1} onPress={() => { setForwardMsg(null); setForwardSel(new Set()); setForwardNote(""); }} style={{ flex: 1, backgroundColor: "#0008" }} />
           <View style={{ backgroundColor: T.surface, borderTopLeftRadius: 28, borderTopRightRadius: 28, padding: 20, paddingBottom: 34, maxHeight: "70%" }}>
             <Text style={{ color: T.text, fontSize: 18, fontWeight: "800", marginBottom: 10 }}>Переслать в…</Text>
             <ScrollView>
@@ -2290,11 +2381,17 @@ function ChatScreen({ ctx, chatId }) {
                 );
               })}
             </ScrollView>
+            {/* комментарий к пересылке уезжает отдельным сообщением после самого форварда */}
+            <TextInput value={forwardNote} onChangeText={setForwardNote} placeholder="Комментарий (необязательно)" placeholderTextColor={T.muted} multiline maxLength={1000}
+              style={{ marginTop: 10, backgroundColor: T.surface2, color: T.text, borderRadius: 14, paddingHorizontal: 14, paddingVertical: 10, maxHeight: 90, fontSize: 15 }} />
             <TouchableOpacity disabled={forwardSel.size === 0} onPress={async () => {
-              const msg = forwardMsg; const ids = [...forwardSel];
-              setForwardMsg(null); setForwardSel(new Set());
+              const msg = forwardMsg; const ids = [...forwardSel]; const note = forwardNote.trim();
+              setForwardMsg(null); setForwardSel(new Set()); setForwardNote("");
               try {
-                for (const id of ids) await sendTo(chats.get(id), { textBody: msg.text || "", image: msg.image || null, forwardedFrom: msg.senderName });
+                for (const id of ids) {
+                  await sendTo(chats.get(id), { textBody: msg.text || "", image: msg.image || null, forwardedFrom: msg.senderName });
+                  if (note) await sendTo(chats.get(id), { textBody: note });
+                }
                 if (ids.length > 1) Alert.alert("", `Переслано в ${ids.length} чатов`);
               } catch (e) { Alert.alert("Ошибка", ruError(e)); }
             }} style={{ marginTop: 12, padding: 14, borderRadius: 999, backgroundColor: forwardSel.size ? T.inverse : T.surface2, alignItems: "center", opacity: forwardSel.size ? 1 : 0.6 }}>
@@ -2616,9 +2713,16 @@ function MessageBubble({ T, m, mine, meUid, group, lastReadByOthers, saved, onLo
           {m.voice && <VoiceBubble T={T} m={m} mine={mine} />}
           {m.media && <MediaBubble T={T} m={m} mine={mine} onPhoto={onPhoto} />}
           {m.game && <TttBubble T={T} m={m} mine={mine} meUid={meUid} onMove={onGameMove} />}
+          {m.dice && (
+            <View style={{ flexDirection: "row", alignItems: "center", gap: 6, paddingVertical: 2 }}>
+              <Text style={{ fontSize: 26 }}>🎲</Text>
+              <Text style={{ color: mine ? T.onInverse : T.text, fontSize: 24, fontWeight: "800" }}>{m.dice.value}</Text>
+              <Text style={{ color: mine ? T.onInverse : T.muted, fontSize: 12, opacity: 0.75 }}>из {m.dice.sides}</Text>
+            </View>
+          )}
           </>)}
           {!!bodyText && !(m.viewOnce && !mine && !(m.viewedBy || {})[meUid]) && (
-            <MentionText text={bodyText} onMention={onMention} onInvite={onInvite}
+            <MentionText text={bodyText} onMention={onMention} onInvite={onInvite} T={T}
               style={{ color: mine ? T.onInverse : T.text, fontSize: 15.5 }}
               mentionStyle={{ fontWeight: "700", textDecorationLine: "underline" }}
               linkStyle={{ color: mine ? T.onInverse : T.inverse, textDecorationLine: "underline", fontWeight: "600" }} />

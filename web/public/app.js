@@ -67,8 +67,18 @@ const STICKERS = ["1F600","1F602","1F60D","1F60E","1F914","1F644","1F62D","1F621
 
 // ---------- utils ----------
 function escapeHtml(v) { return String(v).replace(/[&<>'"]/g, c => ({ "&":"&amp;","<":"&lt;",">":"&gt;","'":"&#39;",'"':"&quot;" }[c])); }
+// Разметка сообщения. Код вынимается ПЕРВЫМ и прячется за плейсхолдер:
+// иначе внутри блока кода сработают ссылки, курсив и @упоминания.
+// Всё остальное форматирование применяется к уже экранированному тексту,
+// так что вставить свой HTML через разметку нельзя.
 function formatMessageText(text) {
-  return escapeHtml(text)
+  const stash = [];
+  const keep = (html) => { stash.push(html); return `\u0000${stash.length - 1}\u0000`; };
+  let s = String(text)
+    .replace(/```([\s\S]*?)```/g, (_, code) =>
+      keep(`<div class="code-block"><button type="button" class="code-copy" title="Скопировать">⧉</button><pre>${escapeHtml(code.replace(/^\r?\n/, "").replace(/\s+$/, ""))}</pre></div>`))
+    .replace(/`([^`\n]+)`/g, (_, code) => keep(`<code>${escapeHtml(code)}</code>`));
+  s = escapeHtml(s)
     .replace(/https?:\/\/[^\s<]+/gi, (u) => {
       const url = u.replace(/[.,;:!?)]+$/, "");
       const m = url.match(/^https?:\/\/(?:sandygram-a3b42\.web\.app|localhost(?::\d+)?)\/join\/([a-f0-9]{6,})$/i);
@@ -76,7 +86,13 @@ function formatMessageText(text) {
       const href = url.replace(/"/g, "%22");
       return `<a href="${href}" target="_blank" rel="noopener noreferrer">${url}</a>`;
     })
-    .replace(/(^|[\s.,:;!?()«»"'-])@([a-z0-9_]{3,24})\b/gi, (_, pre, name) => `${pre}<button type="button" class="mention" data-user="${name.toLowerCase()}">@${name}</button>`);
+    .replace(/(^|[\s.,:;!?()«»"'-])@([a-z0-9_]{3,24})\b/gi, (_, pre, name) => `${pre}<button type="button" class="mention" data-user="${name.toLowerCase()}">@${name}</button>`)
+    // ||спойлер|| — замазан, открывается кликом
+    .replace(/\|\|([\s\S]+?)\|\|/g, (_, inner) => `<span class="spoiler" title="Нажмите, чтобы показать">${inner}</span>`)
+    .replace(/\*\*([^*\n]+)\*\*/g, "<b>$1</b>")
+    .replace(/(^|[^*\w])\*([^*\n]+)\*(?!\*)/g, "$1<i>$2</i>")
+    .replace(/~~([^~\n]+)~~/g, "<s>$1</s>");
+  return s.replace(/\u0000(\d+)\u0000/g, (_, i) => stash[Number(i)] ?? "");
 }
 function toast(msg) { const n = $("#toast"); n.textContent = msg; n.classList.add("show"); clearTimeout(n._t); n._t = setTimeout(() => n.classList.remove("show"), 2500); }
 function randomId(len = 18) { const a = new Uint8Array(len); crypto.getRandomValues(a); return [...a].map(b => b.toString(16).padStart(2, "0")).join("").slice(0, len); }
@@ -1578,6 +1594,7 @@ function buildMessageNode(message) {
     ${message.poll ? renderPollHtml(message) : ""}
     ${message.media ? renderMediaHtml(message) : ""}
     ${message.game ? renderGameHtml(message) : ""}
+    ${message.dice ? `<span class="dice-msg" title="Бросок ${escapeHtml(String(message.dice.sides || 6))}-гранного кубика">🎲 <b>${escapeHtml(String(message.dice.value))}</b><small>из ${escapeHtml(String(message.dice.sides || 6))}</small></span>` : ""}
     <span class="msg-text">${formatMessageText(message.enc ? decryptMessage(message) : (message.text || ""))}</span>
     <span class="meta"><span class="edited">${message.editedAt ? "изм. " : ""}</span>${renderTtlHtml(message)}${formatTime(message.createdAt)} ${ticksFor(message)}</span>
     <div class="reactions"></div>
@@ -1658,6 +1675,16 @@ async function toggleReaction(message, emoji) {
   }
   try { await updateDoc(ref, patch); } catch (error) { toast(ruError(error)); }
 }
+// Полный набор эмодзи для реакции, а не только шесть быстрых
+function openReactionPicker(message) {
+  const grid = EMOJI.map(e => `<button type="button" class="react-pick" data-emoji="${escapeHtml(e)}">${e}</button>`).join("");
+  openModal(`<h3>Реакция</h3><div class="react-picker">${grid}</div><div class="modal-actions"><button class="cancel">Отмена</button></div>`);
+  $("#modal .cancel").addEventListener("click", closeModal);
+  document.querySelectorAll("#modal .react-pick").forEach(b => b.addEventListener("click", () => {
+    closeModal();
+    toggleReaction(message, b.dataset.emoji);
+  }));
+}
 
 // ---------- отправка ----------
 const messageInput = $("#messageInput");
@@ -1688,7 +1715,7 @@ messageInput.addEventListener("keydown", (e) => {
   }
   if (e.key === "Enter" && !e.shiftKey && !("ontouchstart" in window)) { e.preventDefault(); $("#messageForm").requestSubmit(); }
 });
-async function sendMessage({ text = "", image = null, sticker = null, voice = null, poll = null, media = null, game = null, viewOnce = false, toChatId = null, forwardedFrom = null }) {
+async function sendMessage({ text = "", image = null, sticker = null, voice = null, poll = null, media = null, game = null, viewOnce = false, toChatId = null, forwardedFrom = null, dice = null, silent = false }) {
   const chatId = toChatId || currentChatId;
   const chat = chats.get(chatId);
   if (!chat) return;
@@ -1702,6 +1729,9 @@ async function sendMessage({ text = "", image = null, sticker = null, voice = nu
   if (poll) message.poll = poll;
   if (media) message.media = media;
   if (game) message.game = game;
+  if (dice) message.dice = dice;
+  // silent — воркер не будит получателя пушем
+  if (silent) message.silent = true;
   if (viewOnce) { message.viewOnce = true; message.viewedBy = {}; }
   // Исчезающие сообщения: таймер чата превращается в срок жизни сообщения,
   // клиент прячет просроченное сразу, а окончательно удаляет push-worker.
@@ -1742,9 +1772,10 @@ async function sendMessage({ text = "", image = null, sticker = null, voice = nu
     : "";
   const previewText = (chat.e2e ? "🔒 Секретное сообщение" : message.text)
     || (sticker ? "🧩 Стикер" : voice ? "🎤 Голосовое сообщение" : poll ? "📊 Опрос"
-        : game ? "🎮 Крестики-нолики" : mediaPreview);
+        : game ? "🎮 Крестики-нолики" : dice ? `🎲 ${dice.value}` : mediaPreview);
   const chatPatch = {
-    lastMessage: { text: previewText, senderUid: me.uid, senderName: message.senderName, createdAt: message.createdAt, hasImage: !!image || media?.kind === "image" },
+    // silent живёт и в lastMessage: воркер решает про пуш по нему, не читая сообщения
+    lastMessage: { text: previewText, senderUid: me.uid, senderName: message.senderName, createdAt: message.createdAt, hasImage: !!image || media?.kind === "image", silent: !!silent },
     [`lastRead.${me.uid}`]: message.createdAt,
     [`unread.${me.uid}`]: 0,
     [`typing.${me.uid}`]: 0,
@@ -1765,7 +1796,7 @@ $("#messageForm").addEventListener("submit", async (event) => {
   const chat = currentChat();
   if (isForum(chat) && !currentTopic) return;
   // слэш-команды: модерация и служебные
-  if (/^\/(mute|warn|ban|unmute|unban|info|theme|help|saved)\b/i.test(text)) {
+  if (/^\/(mute|warn|ban|unmute|unban|info|theme|help|saved|dice|roll)\b/i.test(text)) {
     sendBusy = true;
     try {
       const handled = await handleSlash(text);
@@ -1786,7 +1817,8 @@ $("#messageForm").addEventListener("submit", async (event) => {
     if (editTarget) {
       await updateDoc(doc(dbf, "chats", currentChatId, "messages", editTarget.id), { text: text.slice(0, 4000), editedAt: Date.now() });
     } else {
-      await sendMessage({ text });
+      await sendMessage({ text, silent: nextSilent });
+      if (nextSilent) { nextSilent = false; $("#sendButton").classList.remove("silent-armed"); }
       const send = $("#sendButton");
       send.classList.remove("sent"); void send.offsetWidth; send.classList.add("sent");
     }
@@ -1799,10 +1831,11 @@ $("#messageForm").addEventListener("submit", async (event) => {
 });
 
 // ---------- reply / edit ----------
-function startReply(message) {
-  editTarget = null; replyTarget = message;
-  $("#replyBarTitle").textContent = `Ответ: ${message.senderName}`;
-  $("#replyBarText").textContent = message.text || "📷 Фото";
+// quote — выделенный фрагмент: в ответ попадёт он, а не всё сообщение целиком
+function startReply(message, quote = "") {
+  editTarget = null; replyTarget = quote ? { ...message, text: quote } : message;
+  $("#replyBarTitle").textContent = quote ? `Цитата: ${message.senderName}` : `Ответ: ${message.senderName}`;
+  $("#replyBarText").textContent = quote || message.text || "📷 Фото";
   $("#replyBar").classList.remove("hidden");
   messageInput.focus();
 }
@@ -1843,6 +1876,16 @@ async function handleSlash(raw) {
   if (c === "saved") {
     const found = [...chats.values()].find(v => v.type === "saved");
     if (found) openChat(found.id); else toast("У вас пока нет «Избранного»");
+    return true;
+  }
+  // /dice [граней] — честный бросок на crypto.getRandomValues, не Math.random
+  if (c === "dice" || c === "roll") {
+    const sides = Math.min(1000, Math.max(2, parseInt(rest[0], 10) || 6));
+    const buf = new Uint32Array(1);
+    // отбрасываем хвост диапазона, иначе младшие значения выпадают чаще
+    const limit = Math.floor(4294967296 / sides) * sides;
+    do { crypto.getRandomValues(buf); } while (buf[0] >= limit);
+    await sendMessage({ dice: { value: (buf[0] % sides) + 1, sides } });
     return true;
   }
   return false;
@@ -1974,6 +2017,13 @@ attachPress($("#attachButton"), () => {
   nextViewOnce = !nextViewOnce;
   $("#attachButton").classList.toggle("view-once-armed", nextViewOnce);
   toast(nextViewOnce ? "Следующее вложение — одноразовое 👁" : "Обычная отправка");
+});
+// Долгое нажатие на «отправить» — послать без пуша, не будя собеседника
+let nextSilent = false;
+attachPress($("#sendButton"), () => {
+  nextSilent = !nextSilent;
+  $("#sendButton").classList.toggle("silent-armed", nextSilent);
+  toast(nextSilent ? "Следующее сообщение — без звука 🔕" : "Обычная отправка");
 });
 $("#fileInput").addEventListener("change", async () => {
   const file = $("#fileInput").files[0];
@@ -2187,9 +2237,14 @@ function showMessageContextMenu(point, node) {
   const chat = currentChat();
   const mine = message.sender === me.uid;
   const isPinned = chat?.pinnedMessageId === message.id;
+  // выделил кусок текста в этом сообщении → в меню появляется «Цитировать»
+  const sel = window.getSelection?.();
+  const quote = sel && !sel.isCollapsed && sel.anchorNode && node.contains(sel.anchorNode)
+    ? String(sel).trim().slice(0, 300) : "";
   showContextMenu(point, `
-    <div class="react-row">${QUICK_REACTIONS.map(e => `<button data-act="react" data-emoji="${e}">${e}</button>`).join("")}</div>
+    <div class="react-row">${QUICK_REACTIONS.map(e => `<button data-act="react" data-emoji="${e}">${e}</button>`).join("")}<button data-act="react-more" title="Все эмодзи">＋</button></div>
     <button data-act="reply">↩ Ответить</button>
+    ${quote ? '<button data-act="quote">❝ Цитировать выделенное</button>' : ""}
     <button data-act="copy">⧉ Копировать</button>
     <button data-act="forward">➦ Переслать</button>
     <button data-act="pin">📌 ${isPinned ? "Открепить" : "Закрепить"}</button>
@@ -2201,6 +2256,8 @@ function showMessageContextMenu(point, node) {
     const act = b.dataset.act;
     try {
       if (act === "react") toggleReaction(message, b.dataset.emoji);
+      else if (act === "react-more") openReactionPicker(message);
+      else if (act === "quote") startReply(message, quote);
       else if (act === "reply") startReply(message);
       else if (act === "copy") { try { await navigator.clipboard.writeText(message.text); toast("Скопировано"); } catch { toast("Не удалось скопировать"); } }
       else if (act === "forward") openForwardPicker(message);
@@ -2278,7 +2335,9 @@ function showChatContextMenu(point, v) {
 function openForwardPicker(message) {
   const views = [...chats.values()].map(viewOf);
   const rows = views.map(c => `<label class="user-row" data-chat="${escapeHtml(c.id)}"><input type="checkbox" class="fwd-chk" value="${escapeHtml(c.id)}" /><span class="avatar" data-color="${escapeHtml(c.avatarColor)}">${c.type === "saved" ? "☆" : escapeHtml((c.title || "?")[0].toUpperCase())}</span><span class="info"><strong>${escapeHtml(c.title)}</strong></span></label>`).join("");
-  openModal(`<h3>Переслать в…</h3><div class="user-results">${rows}</div><div class="modal-actions"><button class="cancel">Отмена</button><button class="primary fwd-go" disabled>Переслать</button></div>`);
+  openModal(`<h3>Переслать в…</h3><div class="user-results">${rows}</div>
+    <textarea class="fwd-comment" rows="2" maxlength="1000" placeholder="Комментарий к пересылке (необязательно)"></textarea>
+    <div class="modal-actions"><button class="cancel">Отмена</button><button class="primary fwd-go" disabled>Переслать</button></div>`);
   const go = $("#modal .fwd-go");
   const update = () => {
     const n = document.querySelectorAll("#modal .fwd-chk:checked").length;
@@ -2289,9 +2348,14 @@ function openForwardPicker(message) {
   $("#modal .cancel").addEventListener("click", closeModal);
   go.addEventListener("click", async () => {
     const ids = [...document.querySelectorAll("#modal .fwd-chk:checked")].map(c => c.value);
+    const comment = ($("#modal .fwd-comment")?.value || "").trim();
     closeModal();
     try {
-      for (const id of ids) await sendMessage({ text: message.text || "", image: message.image || null, toChatId: id, forwardedFrom: message.senderName });
+      for (const id of ids) {
+        await sendMessage({ text: message.text || "", image: message.image || null, toChatId: id, forwardedFrom: message.senderName });
+        // комментарий уходит отдельным сообщением сразу после пересланного
+        if (comment) await sendMessage({ text: comment, toChatId: id });
+      }
       toast(ids.length === 1 ? "Переслано" : `Переслано в ${ids.length} чатов`);
     } catch (error) { toast(ruError(error)); }
   });
@@ -2438,6 +2502,16 @@ $("#messages").addEventListener("click", (e) => {
   if (mention) { e.stopPropagation(); openDmByUsername(mention.dataset.user); return; }
   const invite = e.target.closest(".invite-msg");
   if (invite) { e.stopPropagation(); joinInvite(invite.dataset.invite); return; }
+  // спойлер открывается один раз и обратно не закрывается
+  const spoiler = e.target.closest(".spoiler:not(.open)");
+  if (spoiler) { e.stopPropagation(); spoiler.classList.add("open"); return; }
+  const copy = e.target.closest(".code-copy");
+  if (copy) {
+    e.stopPropagation();
+    const code = copy.parentElement.querySelector("pre")?.textContent || "";
+    navigator.clipboard.writeText(code).then(() => toast("Код скопирован"), () => toast("Не удалось скопировать"));
+    return;
+  }
   const opt = e.target.closest(".poll-option");
   if (opt) {
     e.stopPropagation();
